@@ -1,0 +1,747 @@
+"""quill-dash — self-hosted meeting recordings dashboard.
+
+FastAPI app serving both the JSON API and the static SPA. Binds 127.0.0.1 by
+default (see config.HOST): reach it through a TLS reverse proxy, an SSH tunnel,
+or a VPN interface you bind explicitly. Set QUILL_PASSWORD for any deployment
+reachable from the internet.
+"""
+
+import asyncio
+import hashlib
+import hmac
+import logging
+import mimetypes
+import re
+import secrets
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from . import ai, config, db, ingest
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+log = logging.getLogger("quill.api")
+
+app = FastAPI(title="quill-dash", docs_url=None, openapi_url=None)
+
+STATIC_DIR = Path(__file__).parent.parent / "static"
+
+# ---------------------------------------------------------------- auth
+# Single shared password (public deployment). Cookie = HMAC(secret, "quill").
+# With no QUILL_PASSWORD set (tailnet-only dev), the gate is off.
+
+if config.PASSWORD and len(config.SECRET) < 16:
+    raise RuntimeError("QUILL_PASSWORD is set but QUILL_SECRET is missing/short — refusing to start")
+
+
+def _sign(iat: str) -> str:
+    key = (config.SECRET + config.PASSWORD).encode()
+    return hmac.new(key, f"quill|{iat}".encode(), hashlib.sha256).hexdigest()
+
+
+def _make_cookie() -> str:
+    iat = str(int(time.time()))
+    return f"{iat}.{_sign(iat)}"
+
+
+def _cookie_valid(value: str) -> bool:
+    try:
+        iat, sig = value.split(".", 1)
+    except ValueError:
+        return False
+    if not hmac.compare_digest(sig, _sign(iat)):
+        return False
+    return (time.time() - int(iat)) < 180 * 24 * 3600
+
+
+_login_attempts: dict[str, list[float]] = {}
+
+
+def _throttled(ip: str) -> bool:
+    now = time.time()
+    attempts = [t for t in _login_attempts.get(ip, []) if now - t < 60]
+    _login_attempts[ip] = attempts
+    # Global bucket too: proxy egress IPs rotate, so per-IP alone can be
+    # side-stepped. 20 failures/min across ALL sources locks the door.
+    all_recent = [t for ts in _login_attempts.values() for t in ts if now - t < 60]
+    return len(attempts) >= 5 or len(all_recent) >= 20
+
+
+LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Quill</title>
+<style>body{background:#0d1117;color:#e8e4da;font-family:-apple-system,sans-serif;
+display:grid;place-items:center;min-height:100vh;margin:0}
+form{display:flex;flex-direction:column;gap:14px;width:min(320px,88vw);text-align:center}
+h1{font-family:'Iowan Old Style',Georgia,serif;font-weight:500}
+input{padding:11px 14px;border-radius:9px;border:1px solid #263041;background:#141a23;
+color:#e8e4da;font-size:16px;outline:none;text-align:center}
+button{padding:11px;border-radius:9px;border:none;background:#e8e4da;color:#0d1117;
+font-size:15px;cursor:pointer}.err{color:#e5484d;font-size:13px;min-height:18px}</style>
+</head><body><form method=post action=/login>
+<h1>🪶 Quill</h1>
+<input type=password name=password placeholder="Password" autofocus>
+<button>Enter</button><div class=err>{err}</div></form></body></html>"""
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    if not config.PASSWORD:
+        return await call_next(request)
+    path = request.url.path
+    if path == "/login" or path == "/api/health":
+        return await call_next(request)
+    # Share links: /s/<token> pages and their API are token-authorized —
+    # the unguessable token IS the credential (Notion/GDoc model).
+    if path.startswith("/s/") or path.startswith("/api/shared/"):
+        return await call_next(request)
+    # The SPA's own assets carry no data — guests need them to render /s/ pages.
+    if path in ("/app.js", "/style.css"):
+        return await call_next(request)
+    # The Mac sync pings /api/ingest via server-local curl (no cookie). Trust
+    # only true local calls: loopback client AND no proxy headers — anything
+    # arriving through caddy/Vercel carries X-Forwarded-For and stays gated.
+    if (path.startswith("/api/ingest/")
+            and request.client and request.client.host == "127.0.0.1"
+            and "x-forwarded-for" not in request.headers):
+        return await call_next(request)
+    if _cookie_valid(request.cookies.get("quill_session", "")):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return Response(status_code=401, content='{"detail":"unauthorized"}',
+                        media_type="application/json")
+    return HTMLResponse(LOGIN_HTML.replace("{err}", ""), status_code=401)
+
+
+@app.post("/login")
+async def login(request: Request):
+    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
+    if _throttled(ip):
+        return HTMLResponse(LOGIN_HTML.replace("{err}", "Too many tries — wait a minute"), status_code=429)
+    form = await request.form()
+    if secrets.compare_digest(str(form.get("password", "")), config.PASSWORD):
+        resp = RedirectResponse("/", status_code=303)
+        https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+        resp.set_cookie("quill_session", _make_cookie(), max_age=180 * 24 * 3600,
+                        httponly=True, samesite="lax", secure=https)
+        return resp
+    _login_attempts.setdefault(ip, []).append(time.time())
+    return HTMLResponse(LOGIN_HTML.replace("{err}", "Wrong password"), status_code=401)
+
+
+@app.get("/logout")
+def logout():
+    resp = RedirectResponse("/", status_code=303)
+    resp.delete_cookie("quill_session")
+    return resp
+
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    db.init()
+    pending = ingest.scan_all()
+    for sid in pending:
+        ingest.schedule_ai(sid)
+    if pending:
+        log.info("startup: scheduled AI for %s", pending)
+
+
+# ---------------------------------------------------------------- sessions
+
+@app.get("/api/sessions")
+def list_sessions(q: str = "", tag: str = ""):
+    with db.closing_conn() as conn:
+        rows = conn.execute(
+            """SELECT s.*, (SELECT count(*) FROM actions a
+                            WHERE a.session_id = s.id AND a.done = 0) AS open_actions
+               FROM sessions s ORDER BY started_at DESC""").fetchall()
+    sessions = [db.session_row_to_dict(r) for r in rows]
+    if tag:
+        sessions = [s for s in sessions if tag in (s.get("tags") or [])]
+    if q:
+        ql = q.lower()
+        sessions = [s for s in sessions
+                    if ql in (s.get("title") or "").lower()
+                    or ql in (s.get("overview_md") or "").lower()
+                    or ql in s["id"]]
+    return {"sessions": sessions}
+
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str, lang: str = "en"):
+    import json as _json
+    with db.closing_conn() as conn:
+        row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown session")
+        segs = conn.execute(
+            "SELECT idx, speaker, start_ms, end_ms, text FROM segments"
+            " WHERE session_id=? ORDER BY idx", (session_id,)).fetchall()
+        actions = conn.execute(
+            "SELECT id, text, ru_text, assignee, source_ms, done FROM actions"
+            " WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
+        alt = conn.execute(
+            "SELECT * FROM artifacts_lang WHERE session_id=? AND lang=?",
+            (session_id, lang)).fetchone() if lang != "en" else None
+        ru_cached = bool(conn.execute(
+            "SELECT 1 FROM artifacts_lang WHERE session_id=? AND lang='ru'",
+            (session_id,)).fetchone()) and not conn.execute(
+            "SELECT 1 FROM actions WHERE session_id=? AND ru_text IS NULL LIMIT 1",
+            (session_id,)).fetchone()
+    d = db.session_row_to_dict(row)
+    d["segments"] = [dict(s) for s in segs]
+    d["actions"] = [dict(a) for a in actions]
+    d["lang"] = "en"
+    d["lang_ready"] = {"en": True, "ru": ru_cached}
+    if lang != "en":
+        if alt:
+            d["lang"] = lang
+            d["title"] = alt["title"] or d["title"]
+            d["overview_md"] = alt["overview_md"] or d["overview_md"]
+            d["outline"] = _json.loads(alt["outline_json"] or "[]") or d["outline"]
+            d["keywords"] = _json.loads(alt["keywords_json"] or "[]") or d["keywords"]
+            for a in d["actions"]:
+                if a.get("ru_text"):
+                    a["text"] = a["ru_text"]
+    return d
+
+
+@app.post("/api/ingest/{session_id}")
+async def ingest_endpoint(session_id: str):
+    if not re.fullmatch(r"[\w.\-]+", session_id):
+        raise HTTPException(400, "bad session id")
+    try:
+        result = ingest.ingest_session(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    if result["ai_status"] in ("pending", "failed"):
+        ingest.schedule_ai(session_id)
+    return result
+
+
+@app.get("/api/sessions/{session_id}/status")
+def session_status(session_id: str):
+    with db.closing_conn() as conn:
+        row = conn.execute(
+            "SELECT ai_status, ai_error FROM sessions WHERE id=?", (session_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown session")
+    return dict(row)
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    if not re.fullmatch(r"[\w.\-]+", session_id):
+        raise HTTPException(400, "bad session id")
+    with db.closing_conn() as conn:
+        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+            raise HTTPException(404, "unknown session")
+        conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        conn.execute("DELETE FROM segments_fts WHERE session_id=?", (session_id,))
+        conn.execute("INSERT OR IGNORE INTO deleted_sessions (id) VALUES (?)", (session_id,))
+        conn.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
+    sdir = config.SESSIONS_DIR / session_id
+    if sdir.exists():
+        import shutil
+        shutil.rmtree(sdir)
+    return {"deleted": session_id}
+
+
+_translate_inflight: dict[str, str] = {}   # (session:lang) -> job_id
+
+
+@app.post("/api/sessions/{session_id}/translate")
+async def translate(session_id: str, lang: str = "ru"):
+    import json as _json
+    if lang != "ru":
+        raise HTTPException(400, "only ru supported")
+    flight_key = f"{session_id}:{lang}"
+    existing = _translate_inflight.get(flight_key)
+    if existing and JOBS.get(existing, {}).get("status") == "running":
+        return {"job_id": existing, "ready": False}
+    with db.closing_conn() as conn:
+        row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown session")
+        if row["ai_status"] != "done":
+            raise HTTPException(409, "AI artifacts not ready yet")
+        cached = conn.execute(
+            "SELECT 1 FROM artifacts_lang WHERE session_id=? AND lang=?",
+            (session_id, lang)).fetchone()
+        actions = conn.execute(
+            "SELECT id, text, ru_text FROM actions WHERE session_id=? ORDER BY id",
+            (session_id,)).fetchall()
+    missing = [a for a in actions if not a["ru_text"]]
+    if cached and not missing:
+        return {"job_id": None, "ready": True}
+
+    outline = _json.loads(row["outline_json"] or "[]")
+    keywords = _json.loads(row["keywords_json"] or "[]")
+    snapshot_hash = row["segments_hash"]
+    snapshot_ids = {a["id"] for a in actions}
+    jid = _new_job()
+    _translate_inflight[flight_key] = jid
+
+    async def run():
+        try:
+            if cached and missing:
+                # Cache exists; only newer actions need translating.
+                out = await ai.translate_artifacts(
+                    "Russian", row["title"] or session_id, "",
+                    [], [], [{"id": a["id"], "text": a["text"]} for a in missing])
+            else:
+                out = await ai.translate_artifacts(
+                    "Russian", row["title"] or session_id, row["overview_md"] or "",
+                    outline, keywords,
+                    [{"id": a["id"], "text": a["text"]} for a in actions])
+            with db.closing_conn() as conn:
+                # Stale guard (#1): if the transcript re-ingested or the AI
+                # regenerated (new action ids / new hash), this snapshot is
+                # dead — discard rather than publish mixed-language state.
+                cur = conn.execute(
+                    "SELECT segments_hash FROM sessions WHERE id=?", (session_id,)).fetchone()
+                cur_ids = {r["id"] for r in conn.execute(
+                    "SELECT id FROM actions WHERE session_id=?", (session_id,))}
+                if not cur or cur["segments_hash"] != snapshot_hash or not snapshot_ids <= cur_ids:
+                    raise ai.AIError("notes changed while translating — flip RU again")
+                if not (cached and missing):
+                    conn.execute(
+                        """INSERT OR REPLACE INTO artifacts_lang
+                           (session_id, lang, title, overview_md, outline_json, keywords_json)
+                           VALUES (?,?,?,?,?,?)""",
+                        (session_id, lang, out["title"], out["overview_md"],
+                         _json.dumps(out["outline"], ensure_ascii=False),
+                         _json.dumps(out["keywords"], ensure_ascii=False)))
+                for item in out["actions"]:
+                    conn.execute("UPDATE actions SET ru_text=? WHERE id=?",
+                                 (item["text"], item["id"]))
+            _finish_job(jid, answer="ready")
+        except Exception as e:  # noqa: BLE001
+            _finish_job(jid, error=str(e)[:300])
+        finally:
+            if _translate_inflight.get(flight_key) == jid:
+                _translate_inflight.pop(flight_key, None)
+
+    asyncio.get_running_loop().create_task(run())
+    return {"job_id": jid, "ready": False}
+
+
+@app.post("/api/sessions/{session_id}/regenerate")
+async def regenerate(session_id: str):
+    with db.closing_conn() as conn:
+        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+            raise HTTPException(404, "unknown session")
+        conn.execute("UPDATE sessions SET ai_status='pending' WHERE id=?", (session_id,))
+    started = ingest.schedule_ai(session_id)
+    return {"scheduled": started}
+
+
+# ---------------------------------------------------------------- sharing
+
+def _public_base(request: Request) -> str:
+    if config.PUBLIC_BASE:
+        return config.PUBLIC_BASE
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+@app.post("/api/sessions/{session_id}/share")
+def create_share(session_id: str, request: Request, lang: str = "en"):
+    with db.closing_conn() as conn:
+        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+            raise HTTPException(404, "unknown session")
+        row = conn.execute(
+            "SELECT token FROM share_tokens WHERE session_id=?", (session_id,)).fetchone()
+        if row:
+            conn.execute("UPDATE share_tokens SET lang=? WHERE session_id=?",
+                         (lang, session_id))
+            return {"token": row["token"], "lang": lang,
+                    "url": f"{_public_base(request)}/s/{row['token']}"}
+        token = secrets.token_urlsafe(18)
+        conn.execute(
+            "INSERT INTO share_tokens (token, session_id, lang) VALUES (?,?,?)",
+            (token, session_id, lang))
+    return {"token": token, "lang": lang, "url": f"{_public_base(request)}/s/{token}"}
+
+
+@app.delete("/api/sessions/{session_id}/share")
+def revoke_share(session_id: str):
+    with db.closing_conn() as conn:
+        conn.execute("DELETE FROM share_tokens WHERE session_id=?", (session_id,))
+    return {"revoked": True}
+
+
+@app.get("/api/sessions/{session_id}/share")
+def get_share(session_id: str):
+    with db.closing_conn() as conn:
+        row = conn.execute(
+            "SELECT token, lang FROM share_tokens WHERE session_id=?", (session_id,)).fetchone()
+    return {"token": row["token"] if row else None, "lang": row["lang"] if row else None}
+
+
+def _shared_session(token: str):
+    with db.closing_conn() as conn:
+        t = conn.execute("SELECT * FROM share_tokens WHERE token=?", (token,)).fetchone()
+        if not t:
+            raise HTTPException(404, "invalid or revoked link")
+    return t
+
+
+@app.get("/api/shared/{token}")
+def shared_payload(token: str, response: Response):
+    t = _shared_session(token)
+    d = get_session(t["session_id"], lang=t["lang"])
+    # Strict guest DTO: exactly what the share page renders, nothing else.
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "shared": True,
+        "id": d["id"],
+        "lang": d["lang"],
+        "title": d.get("title"),
+        "started_at": d["started_at"],
+        "duration_s": d["duration_s"],
+        "overview_md": d.get("overview_md"),
+        "outline": [{"ms": int(o["ms"]), "label": o["label"]} for o in d.get("outline", [])],
+        "segments": [
+            {"idx": s["idx"],
+             "speaker": s["speaker"] if s["speaker"] in ("me", "them") else "them",
+             "start_ms": int(s["start_ms"]), "end_ms": int(s["end_ms"]),
+             "text": s["text"]}
+            for s in d["segments"]],
+        "actions": [{"text": a["text"], "assignee": a.get("assignee"),
+                     "done": bool(a["done"])} for a in d["actions"]],
+        "has_audio_mixed": d["has_audio_mixed"],
+        "has_audio_system": d["has_audio_system"],
+        "has_audio_mic": d["has_audio_mic"],
+    }
+
+
+@app.get("/api/shared/{token}/audio/{track}")
+def shared_audio(token: str, track: str, request: Request):
+    t = _shared_session(token)
+    return audio(t["session_id"], track, request)
+
+
+DEAD_LINK_HTML = """<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Quill</title>
+<style>body{background:#0d1117;color:#e8e4da;font-family:-apple-system,sans-serif;
+display:grid;place-items:center;min-height:100vh;margin:0;text-align:center}
+h1{font-family:'Iowan Old Style',Georgia,serif;font-weight:500}
+p{color:#9aa3ae}</style></head><body><div>
+<h1>🪶 Эта ссылка больше не действует</h1>
+<p>This link is no longer active. Ask the person who shared it for a new one.</p>
+</div></body></html>"""
+
+
+@app.get("/s/{token}")
+def share_page(token: str):
+    try:
+        _shared_session(token)
+    except HTTPException:
+        return HTMLResponse(DEAD_LINK_HTML, status_code=404)
+    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+
+# ---------------------------------------------------------------- audio
+
+@app.get("/api/sessions/{session_id}/audio/{track}")
+def audio(session_id: str, track: str, request: Request):
+    if track not in ("mic", "system", "mixed"):
+        raise HTTPException(404, "unknown track")
+    with db.closing_conn() as conn:
+        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+            raise HTTPException(404, "unknown session")
+    path = config.SESSIONS_DIR / session_id / f"{track}.m4a"
+    if not path.exists():
+        raise HTTPException(404, "no audio")
+    return _range_file_response(path, request)
+
+
+def _range_file_response(path: Path, request: Request) -> Response:
+    """Minimal HTTP Range support so <audio> seeking works."""
+    file_size = path.stat().st_size
+    content_type = mimetypes.guess_type(str(path))[0] or "audio/mp4"
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(path, media_type=content_type)
+    m = re.match(r"bytes=(\d*)-(\d*)$", range_header)
+    if not m or (not m.group(1) and not m.group(2)):
+        raise HTTPException(416, "bad range")
+    if not m.group(1):
+        # suffix range: last N bytes
+        n = int(m.group(2))
+        start, end = max(0, file_size - n), file_size - 1
+    else:
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else file_size - 1
+    end = min(end, file_size - 1)
+    if start > end or start >= file_size:
+        raise HTTPException(416, "bad range")
+
+    def stream(s=start, e=end):
+        with open(path, "rb") as f:
+            f.seek(s)
+            remaining = e - s + 1
+            while remaining > 0:
+                chunk = f.read(min(256 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    from starlette.responses import StreamingResponse
+    return StreamingResponse(
+        stream(), status_code=206, media_type=content_type,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+        })
+
+
+# ---------------------------------------------------------------- search
+
+@app.get("/api/search")
+def search(q: str):
+    q = q.strip()
+    if not q:
+        return {"results": []}
+    # FTS5 phrase-safe query: quote each term.
+    fts_q = " ".join(f'"{t}"' for t in re.findall(r"\w+", q))
+    if not fts_q:
+        return {"results": []}
+    with db.closing_conn() as conn:
+        rows = conn.execute(
+            """SELECT f.session_id, f.idx,
+                      snippet(segments_fts, 0, char(1), char(2), '…', 12) AS snip,
+                      seg.start_ms, seg.speaker,
+                      s.title, s.started_at
+               FROM segments_fts f
+               JOIN segments seg ON seg.session_id = f.session_id AND seg.idx = f.idx
+               JOIN sessions s ON s.id = f.session_id
+               WHERE segments_fts MATCH ?
+               ORDER BY s.started_at DESC, f.idx
+               LIMIT 100""", (fts_q,)).fetchall()
+    return {"results": [dict(r) for r in rows]}
+
+
+# ---------------------------------------------------------------- actions
+
+class ActionToggle(BaseModel):
+    done: bool
+
+
+@app.get("/api/actions")
+def all_actions(include_done: bool = False):
+    with db.closing_conn() as conn:
+        rows = conn.execute(
+            """SELECT a.*, s.title AS session_title, s.started_at
+               FROM actions a JOIN sessions s ON s.id = a.session_id
+               {} ORDER BY a.done, s.started_at DESC, a.id"""
+            .format("" if include_done else "WHERE a.done = 0")).fetchall()
+    return {"actions": [dict(r) for r in rows]}
+
+
+@app.post("/api/actions/{action_id}/toggle")
+def toggle_action(action_id: int, body: ActionToggle):
+    with db.closing_conn() as conn:
+        cur = conn.execute(
+            "UPDATE actions SET done=? WHERE id=?", (int(body.done), action_id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "unknown action")
+    return {"ok": True}
+
+
+class ActionCreate(BaseModel):
+    session_id: str
+    text: str
+    assignee: str | None = None
+
+
+@app.post("/api/actions")
+def create_action(body: ActionCreate):
+    with db.closing_conn() as conn:
+        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (body.session_id,)).fetchone():
+            raise HTTPException(404, "unknown session")
+        cur = conn.execute(
+            "INSERT INTO actions (session_id, text, assignee) VALUES (?,?,?)",
+            (body.session_id, body.text, body.assignee))
+        return {"id": cur.lastrowid}
+
+
+# ---------------------------------------------------------------- chat
+
+class ChatBody(BaseModel):
+    question: str
+
+
+# Chat runs can outlive any proxy timeout — submit returns a job id, the SPA
+# polls /api/jobs/{id}. Jobs live in memory (single-process deployment).
+JOBS: dict[str, dict] = {}
+
+
+def _new_job() -> str:
+    jid = uuid.uuid4().hex[:12]
+    JOBS[jid] = {"status": "running", "answer": None, "error": None, "ts": time.time()}
+    for k in [k for k, v in JOBS.items() if time.time() - v["ts"] > 3600]:
+        JOBS.pop(k, None)
+    return jid
+
+
+def _finish_job(jid: str, answer=None, error=None):
+    if jid in JOBS:
+        JOBS[jid].update(status="failed" if error else "done", answer=answer, error=error)
+
+
+@app.get("/api/jobs/{jid}")
+def job_status(jid: str):
+    j = JOBS.get(jid)
+    if not j:
+        raise HTTPException(404, "unknown job")
+    return j
+
+
+_chat_scope_locks: dict[str, asyncio.Lock] = {}
+
+
+def _scope_lock(key: str) -> asyncio.Lock:
+    if key not in _chat_scope_locks:
+        _chat_scope_locks[key] = asyncio.Lock()
+    return _chat_scope_locks[key]
+
+
+def _history(conn, scope: str, session_id: str | None):
+    rows = conn.execute(
+        """SELECT role, content FROM chat_messages
+           WHERE scope=? AND (session_id=? OR (session_id IS NULL AND ? IS NULL))
+           ORDER BY id DESC LIMIT 10""",
+        (scope, session_id, session_id)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+@app.post("/api/sessions/{session_id}/chat")
+async def session_chat(session_id: str, body: ChatBody):
+    with db.closing_conn() as conn:
+        segs = conn.execute(
+            "SELECT speaker, start_ms, end_ms, text FROM segments"
+            " WHERE session_id=? ORDER BY idx", (session_id,)).fetchall()
+        if not segs:
+            raise HTTPException(404, "unknown or empty session")
+    jid = _new_job()
+
+    async def run():
+        try:
+            async with _scope_lock(f"session:{session_id}"):
+                with db.closing_conn() as conn:
+                    history = _history(conn, "session", session_id)
+                answer = await ai.chat_session([dict(s) for s in segs], history, body.question)
+            with db.closing_conn() as conn:
+                conn.execute(
+                    "INSERT INTO chat_messages (scope, session_id, role, content) VALUES ('session',?,?,?)",
+                    (session_id, "user", body.question))
+                conn.execute(
+                    "INSERT INTO chat_messages (scope, session_id, role, content) VALUES ('session',?,?,?)",
+                    (session_id, "assistant", answer))
+            _finish_job(jid, answer=answer)
+        except Exception as e:  # noqa: BLE001
+            _finish_job(jid, error=str(e)[:300])
+
+    asyncio.get_running_loop().create_task(run())
+    return {"job_id": jid}
+
+
+@app.post("/api/ask")
+async def global_ask(body: ChatBody):
+    # Retrieval: bm25-ranked FTS hits (stopwords dropped), context windows
+    # around the exact matching segments, recent history folded into the query.
+    STOP = {"what","did","does","the","a","an","и","в","на","что","как","did",
+            "we","i","you","he","she","it","они","мы","я","ты","о","по","не",
+            "is","are","was","were","do","about","tell","me","us"}
+    with db.closing_conn() as conn:
+        history = _history(conn, "global", None)
+        hist_text = " ".join(m["content"] for m in history[-4:] if m["role"] == "user")
+        terms = [t for t in re.findall(r"\w+", f"{body.question} {hist_text}")
+                 if len(t) > 2 and t.lower() not in STOP]
+        blocks: list[str] = []
+        seg_hits: list = []
+        if terms:
+            fts_q = " OR ".join(f'"{t}"' for t in terms[:16])
+            seg_hits = conn.execute(
+                """SELECT f.session_id, f.idx FROM segments_fts f
+                   WHERE segments_fts MATCH ? ORDER BY bm25(segments_fts) LIMIT 40""",
+                (fts_q,)).fetchall()
+        by_session: dict[str, list[int]] = {}
+        for h in seg_hits:
+            by_session.setdefault(h["session_id"], []).append(h["idx"])
+        hit_ids = list(by_session.keys())[:6]
+        if not hit_ids:
+            hit_ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 4")]
+        for sid in hit_ids:
+            srow = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+            if not srow:
+                continue
+            idxs = sorted(set(by_session.get(sid, [])))
+            if idxs:
+                want = set()
+                for ix in idxs[:8]:
+                    want.update(range(max(0, ix - 6), ix + 7))
+                qmarks = ",".join("?" * len(want))
+                segs = conn.execute(
+                    f"SELECT speaker, start_ms, end_ms, text FROM segments"
+                    f" WHERE session_id=? AND idx IN ({qmarks}) ORDER BY idx",
+                    (sid, *sorted(want))).fetchall()
+            else:
+                segs = conn.execute(
+                    "SELECT speaker, start_ms, end_ms, text FROM segments"
+                    " WHERE session_id=? ORDER BY idx", (sid,)).fetchall()
+            block = (f"=== Meeting: {srow['title'] or sid} ({srow['started_at']}) ===\n"
+                     + ai.transcript_block([dict(s) for s in segs], max_chars=30_000))
+            blocks.append(block)
+    jid = _new_job()
+
+    async def run():
+        try:
+            async with _scope_lock("global"):
+                with db.closing_conn() as conn:
+                    history2 = _history(conn, "global", None)
+                answer = await ai.chat_global(blocks, history2, body.question)
+            with db.closing_conn() as conn:
+                conn.execute(
+                    "INSERT INTO chat_messages (scope, role, content) VALUES ('global','user',?)",
+                    (body.question,))
+                conn.execute(
+                    "INSERT INTO chat_messages (scope, role, content) VALUES ('global','assistant',?)",
+                    (answer,))
+            _finish_job(jid, answer=answer)
+        except Exception as e:  # noqa: BLE001
+            _finish_job(jid, error=str(e)[:300])
+
+    asyncio.get_running_loop().create_task(run())
+    return {"job_id": jid}
+
+
+@app.get("/api/chat/{scope}")
+def chat_history(scope: str, session_id: str | None = None):
+    if scope not in ("session", "global"):
+        raise HTTPException(404, "bad scope")
+    with db.closing_conn() as conn:
+        if session_id and not conn.execute(
+                "SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+            raise HTTPException(404, "unknown session")
+        return {"messages": _history(conn, scope, session_id)}
+
+
+# ---------------------------------------------------------------- static SPA
+
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

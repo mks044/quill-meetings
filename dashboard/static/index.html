@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quill</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><text y='19' font-size='19'>🪶</text></svg>">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/">
+    <svg class="brand-feather" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.67 19a2 2 0 0 0 1.416-.588l6.154-6.172a6 6 0 0 0-8.49-8.49L5.586 9.914A2 2 0 0 0 5 11.328V18a1 1 0 0 0 1 1z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/></svg>
+    <span>Quill</span>
+  </a>
+  <nav class="topnav">
+    <a href="#/" data-nav="library">Meetings</a>
+    <a href="#/actions" data-nav="actions">Action items</a>
+    <a href="#/ask" data-nav="ask">Ask</a>
+  </nav>
+  <div class="top-search">
+    <input id="global-search" type="search" placeholder="Search every word spoken…" autocomplete="off">
+  </div>
+</header>
+
+<main id="view"></main>
+
+<div id="player-bar" class="player-bar hidden">
+  <button id="pb-play" class="pb-btn" title="Play/pause (Space)">▶</button>
+  <span id="pb-time" class="pb-time">0:00</span>
+  <div id="pb-scrub" class="pb-scrub"><div id="pb-progress" class="pb-progress"></div></div>
+  <span id="pb-dur" class="pb-time">0:00</span>
+  <div class="pb-tracks" id="pb-tracks"></div>
+  <button id="pb-speed" class="pb-btn pb-speed" title="Playback speed">1×</button>
+  <audio id="audio" preload="metadata"></audio>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

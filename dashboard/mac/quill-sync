@@ -1,0 +1,106 @@
+#!/bin/zsh
+# quill-sync — push finished quill sessions to the quill-dash server.
+# Fired by quill's on_stop hook (session dir as $1) and safe to run bare:
+# every invocation syncs ALL local sessions that have a transcript, so a
+# failed/offline run self-heals on the next stop. Loud on failure (macOS
+# notification) — silent sync failures are how meetings get lost.
+#
+# Concurrency: an atomic lock dir serializes overlapping invocations (hook
+# firing while a manual run is live). Transcodes go to a temp name + atomic
+# rename so a parallel reader can never ship a half-written file.
+
+set -u
+
+# Config: ~/.config/quill-dash/sync.conf (shell syntax), e.g.
+#   REMOTE="user@your-server"                 # ssh target running quill-dash
+#   REMOTE_DIR="/home/user/quill-data/sessions"
+#   DASH_URL="http://localhost:7435"          # dashboard as seen FROM the server
+#   RECORDINGS="$HOME/Recordings"             # optional, this is the default
+# A GUI/login-item-launched recorder hands us a minimal PATH — Homebrew's bin
+# dirs are missing, so ffmpeg (mixed track) would silently never run.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+CONF="${QUILL_SYNC_CONF:-$HOME/.config/quill-dash/sync.conf}"
+[[ -f "$CONF" ]] && source "$CONF"
+REMOTE="${REMOTE:-}"
+REMOTE_DIR="${REMOTE_DIR:-/home/$(whoami)/quill-data/sessions}"
+DASH_URL="${DASH_URL:-http://localhost:7435}"
+RECORDINGS="${RECORDINGS:-$HOME/Recordings}"
+LOG="$HOME/.local/state/quill-sync.log"
+LOCK="$HOME/.local/state/quill-sync.lock"
+mkdir -p "$(dirname "$LOG")"
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+notify() { /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null }
+
+# Atomic lock; stale locks (>30 min) are reclaimed.
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]]; then
+    rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || { log "lock contention, exiting"; exit 0 }
+  else
+    log "another sync is running, exiting"; exit 0
+  fi
+fi
+trap 'rm -rf "$LOCK"' EXIT
+
+fail() {
+  log "FAIL: $1"
+  notify "quill sync failed" "$1 — will retry on next recording"
+  exit 1
+}
+
+command -v rsync >/dev/null || fail "rsync missing"
+[[ -n "$REMOTE" ]] || fail "no REMOTE configured (see $CONF)"
+
+transcode() {  # $1 src.caf  $2 dst.m4a
+  local tmp="$2.tmp-$$.m4a"
+  if /usr/bin/afconvert -f m4af -d aac -b 64000 "$1" "$tmp" 2>> "$LOG"; then
+    mv -f "$tmp" "$2"
+  else
+    rm -f "$tmp"; return 1
+  fi
+}
+
+synced=0
+for dir in "$RECORDINGS"/*(N/); do
+  id="${dir:t}"
+  [[ -f "$dir/transcript.json" ]] || continue
+
+  for track in mic system; do
+    if [[ -f "$dir/$track.caf" && ! -f "$dir/$track.m4a" ]]; then
+      transcode "$dir/$track.caf" "$dir/$track.m4a" \
+        || log "afconvert failed for $id/$track (that track won't play in the dashboard)"
+    fi
+  done
+
+  # Mixed track (both sides in one stream) — the dashboard's default playback.
+  if [[ -f "$dir/mic.caf" && -f "$dir/system.caf" && ! -f "$dir/mixed.m4a" ]] \
+     && command -v ffmpeg >/dev/null; then
+    tmpmix="$dir/mixed.tmp-$$.m4a"
+    if ffmpeg -hide_banner -loglevel error -y \
+         -i "$dir/mic.caf" -i "$dir/system.caf" \
+         -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=1" \
+         -c:a aac -b:a 96k "$tmpmix" 2>> "$LOG"; then
+      mv -f "$tmpmix" "$dir/mixed.m4a"
+    else
+      rm -f "$tmpmix"; log "ffmpeg mix failed for $id (falling back to separate tracks)"
+    fi
+  fi
+
+  rsync -az --timeout=30 \
+    --include="transcript.json" --include="meta.json" --include="*.m4a" \
+    --include="transcribe.log" --exclude="*" \
+    "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1 \
+    || fail "rsync $id (server unreachable?)"
+
+  if ! ssh -o ConnectTimeout=10 "$REMOTE" \
+      "curl -fsS --max-time 30 -X POST $DASH_URL/api/ingest/$id -o /dev/null" >> "$LOG" 2>&1; then
+    log "ingest ping FAILED for $id"
+    notify "quill sync" "$id uploaded but ingest failed — dashboard will catch up on restart"
+  fi
+
+  synced=$((synced+1))
+  log "synced $id"
+done
+
+log "done — $synced session(s) checked"

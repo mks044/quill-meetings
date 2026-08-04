@@ -1,0 +1,6 @@
+{
+  "$comment": "Optional: put the dashboard behind a clean public URL. Point destination at YOUR server's HTTPS origin (see SETUP.md).",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "https://quill.example.com/$1" }
+  ]
+}
