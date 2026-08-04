@@ -180,7 +180,7 @@ Produce a JSON object with:
   using the transcript timestamps (convert m:ss to ms).
 - keywords: 3-8 short topical keywords.
 - tags: 1-3 short categorical tags. Prefer these when they fit, else invent one:
-  {tag_vocabulary}.
+  {{tag_vocabulary}}.
 - actions: action items stated or implied. Each: text (imperative, specific),
   assignee ("me" if it is the operator's own task, else the person's name,
   null if unclear),
