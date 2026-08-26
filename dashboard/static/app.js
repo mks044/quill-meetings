@@ -351,7 +351,7 @@ async function libraryView(gen) {
 function cardHTML(s) {
   const d = dateParts(s.started_at);
   const aiNote = s.ai_status !== "done"
-    ? `<span class="ai-badge ${s.ai_status}">${s.ai_status === "failed" ? "AI failed" : "AI working…"}</span>` : "";
+    ? `<span class="ai-badge ${s.ai_status}">${esc(aiBadgeText(s))}</span>` : "";
   const snippet = (s.overview_md || "").replace(/[#*-]/g, "").slice(0, 220);
   return `<a class="meeting-card" href="#/m/${encodeURIComponent(s.id)}">
     <div class="mc-date"><b>${d.day}</b>${d.year}<br>${d.time}</div>
@@ -616,7 +616,10 @@ async function meetingView(id, gen) {
     $("#btn-regen").textContent = "AI working…";
     pollAI(s.id);
   });
-  if (s.ai_status === "pending" || s.ai_status === "running") pollAI(s.id);
+  if (s.ai_status === "pending" || s.ai_status === "running"
+      || (s.ai_status === "failed" && s.ai_retry_at)) {
+    pollAI(s.id, s.ai_status);
+  }
 
   // in-transcript search
   wireTranscriptSearch();
@@ -644,9 +647,17 @@ async function meetingView(id, gen) {
 }
 
 function aiLabel(s) {
-  return s.ai_status === "failed" ? `AI failed: ${s.ai_error || "unknown"} — hit Regenerate`
+  return s.ai_status === "failed" && s.ai_retry_at
+    ? `AI paused: ${s.ai_error || "temporary failure"} — automatic retry scheduled`
+    : s.ai_status === "failed" ? `AI failed: ${s.ai_error || "unknown"} — hit Regenerate`
     : s.ai_status === "running" ? "AI is reading the meeting…"
     : s.ai_status === "pending" ? "AI queued…" : "";
+}
+
+function aiBadgeText(s) {
+  return s.ai_status === "failed" && s.ai_retry_at ? "AI retrying…"
+    : s.ai_status === "failed" ? "AI failed"
+    : "AI working…";
 }
 
 function actionsHTML(actions) {
@@ -661,7 +672,7 @@ function actionsHTML(actions) {
     </label>`).join("");
 }
 
-async function pollAI(id) {
+async function pollAI(id, initialStatus) {
   let delay = 4000;
   for (let i = 0; i < 400; i++) {
     await new Promise((r) => setTimeout(r, delay));
@@ -669,7 +680,10 @@ async function pollAI(id) {
     if (!location.hash.includes(encodeURIComponent(id))) return;
     try {
       const s = await api(`/api/sessions/${encodeURIComponent(id)}/status`);
-      if (s.ai_status === "done" || s.ai_status === "failed") { route(); return; }
+      const terminalFailure = s.ai_status === "failed" && !s.ai_retry_at;
+      if (s.ai_status === "done" || terminalFailure || s.ai_status !== initialStatus) {
+        route(); return;
+      }
     } catch { /* transient — keep polling */ }
   }
 }
