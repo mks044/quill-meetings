@@ -155,6 +155,13 @@ Tell the operator, in their words:
 
 - Audio never leaves the Mac for transcription: Whisper runs on-device. The
   server only receives the finished transcript and audio files.
+- A provisional `meta.json` is written when capture starts and atomically
+  finalized on stop. A hard power loss therefore remains discoverable by the
+  next-launch recovery scan; CAF does not need a finalization pass.
+- `afconvert` and `whisper-cli` use file-backed diagnostics rather than bounded
+  pipes. Whisper has a 30-minute watchdog (override with
+  `QUILL_WHISPER_TIMEOUT_SECONDS`); a timeout is killed, moved behind later
+  sessions, and retried once, so one bad recording cannot wedge the queue.
 - `quill-sync` is catch-up by design — every run uploads *everything* not yet
   synced, so an offline laptop self-heals. Run it by hand any time.
 - Ingest is idempotent; re-uploading a session does not duplicate it. Deleting a

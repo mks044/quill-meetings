@@ -1,4 +1,5 @@
 import Foundation
+import QuillSession
 
 /// One meeting recording: a timestamped folder holding two independent tracks
 /// (mic = you, system = them) plus a meta.json written on clean stop. Tracks
@@ -38,7 +39,9 @@ final class RecordingSession {
         try system.start(writingTo: dir.appendingPathComponent("system.caf"))
         do {
             try mic.start(writingTo: dir.appendingPathComponent("mic.caf"))
+            try SessionManifest.recording(startedAt: startedAt).write(to: dir)
         } catch {
+            mic.stop()
             system.stop()
             throw error
         }
@@ -50,29 +53,20 @@ final class RecordingSession {
         system.stop()
 
         let ended = Date()
-        let iso = ISO8601DateFormatter()
 
-        // The tracks don't start on the same buffer; record how far each
-        // lags the earliest so transcript timestamps share one clock.
-        let micStart = mic.firstBufferAt ?? startedAt
-        let systemStart = system.firstBufferAt ?? startedAt
-        let earliest = min(micStart, systemStart)
-
-        let meta: [String: Any] = [
-            "started": iso.string(from: startedAt),
-            "ended": iso.string(from: ended),
-            "duration_seconds": Int(ended.timeIntervalSince(startedAt)),
-            "files": ["mic": "mic.caf", "system": "system.caf"],
-            "start_offset_ms": [
-                "mic": Int(micStart.timeIntervalSince(earliest) * 1000),
-                "system": Int(systemStart.timeIntervalSince(earliest) * 1000),
-            ],
-        ]
-        if let data = try? JSONSerialization.data(
-            withJSONObject: meta,
-            options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? data.write(to: dir.appendingPathComponent("meta.json"))
+        do {
+            // The tracks don't start on the same buffer; record how far each
+            // lags the earliest so transcript timestamps share one clock.
+            try SessionManifest.complete(
+                startedAt: startedAt,
+                endedAt: ended,
+                micStartedAt: mic.firstBufferAt,
+                systemStartedAt: system.firstBufferAt
+            ).write(to: dir)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "failed to finalize \(dir.path)/meta.json: \(error)\n".utf8
+            ))
         }
     }
 }

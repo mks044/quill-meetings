@@ -66,6 +66,17 @@ Whisper transcribes locally  │
 **Requirements:** a Mac on macOS 15+ (Apple Silicon recommended), any always-on
 Linux server, and a ChatGPT subscription for the Codex CLI.
 
+## Recovery guarantees
+
+- Quill writes a provisional session manifest as soon as recording starts, so
+  a hard power loss still leaves the CAF tracks discoverable on next launch.
+- Transcription subprocesses never write into bounded pipes and have a
+  30-minute watchdog (`QUILL_WHISPER_TIMEOUT_SECONDS` overrides it). A timed-out
+  session is killed, moved behind later work, and retried once.
+- Transcripts are written atomically; the upload hook runs only after a complete
+  transcript exists, and startup rescans every finalized-but-untranscribed
+  session.
+
 ## License
 
 MIT. `recorder/` is a fork of [digimata/quill](https://github.com/digimata/quill)

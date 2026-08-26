@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import QuillProcess
 
 /// OpenAI Whisper large-v3-turbo via the whisper.cpp CLI (Homebrew build,
 /// Metal-accelerated). Multilingual with per-track language auto-detection,
@@ -11,6 +12,9 @@ import Foundation
 /// down. The model file (~1.6 GB) downloads once into quill's own cache;
 /// after that everything runs offline.
 actor WhisperEngine: TranscriptionEngine {
+    private static let conversionTimeout: TimeInterval = 5 * 60
+    private static let defaultDecodeTimeout: TimeInterval = 30 * 60
+
     enum EngineError: Error, CustomStringConvertible {
         case cliMissing
         case unreadableAudio(URL, Error?)
@@ -118,9 +122,10 @@ actor WhisperEngine: TranscriptionEngine {
         // whisper-cli wants PCM WAV; the tracks are AAC CAF. afconvert ships
         // with macOS: 16 kHz mono 16-bit little-endian.
         let wav = work.appendingPathComponent("audio.wav")
-        let convert = try Self.run(
+        let convert = try ProcessRunner.run(
             "/usr/bin/afconvert",
-            ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", audio.path, wav.path]
+            ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", audio.path, wav.path],
+            timeout: Self.conversionTimeout
         )
         guard convert.status == 0 else {
             throw EngineError.conversionFailed(audio, convert.stderr)
@@ -131,16 +136,20 @@ actor WhisperEngine: TranscriptionEngine {
         // prior output as the next window's prompt, so one garbled stretch
         // (music, crosstalk) degrades style — punctuation, casing — for the
         // rest of a long recording.
-        let decode = try Self.run(cli, [
-            "-m", Self.modelPath.path,
-            "-f", wav.path,
-            "-l", "auto",
-            "--vad", "-vm", Self.vadPath.path,
-            "-mc", "0",
-            "-oj",
-            "-of", outBase,
-            "-np",
-        ])
+        let decode = try ProcessRunner.run(
+            cli,
+            [
+                "-m", Self.modelPath.path,
+                "-f", wav.path,
+                "-l", "auto",
+                "--vad", "-vm", Self.vadPath.path,
+                "-mc", "0",
+                "-oj",
+                "-of", outBase,
+                "-np",
+            ],
+            timeout: Self.decodeTimeout
+        )
         guard decode.status == 0 else {
             throw EngineError.decodeFailed(audio, decode.stderr)
         }
@@ -180,18 +189,12 @@ actor WhisperEngine: TranscriptionEngine {
         }
     }
 
-    private static func run(
-        _ launchPath: String, _ arguments: [String]
-    ) throws -> (status: Int32, stderr: String) {
-        let task = Process()
-        task.launchPath = launchPath
-        task.arguments = arguments
-        let errPipe = Pipe()
-        task.standardError = errPipe
-        task.standardOutput = Pipe()
-        try task.run()
-        task.waitUntilExit()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        return (task.terminationStatus, String(data: errData, encoding: .utf8) ?? "")
+    private static var decodeTimeout: TimeInterval {
+        guard
+            let raw = ProcessInfo.processInfo.environment["QUILL_WHISPER_TIMEOUT_SECONDS"],
+            let configured = TimeInterval(raw),
+            configured.isFinite
+        else { return defaultDecodeTimeout }
+        return min(max(configured, 60), 6 * 60 * 60)
     }
 }

@@ -8,9 +8,13 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
     ],
     targets: [
+        .target(name: "QuillProcess"),
+        .target(name: "QuillSession"),
         .executableTarget(
             name: "quill",
             dependencies: [
+                "QuillProcess",
+                "QuillSession",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             exclude: ["Info.plist"],
@@ -25,6 +29,14 @@ let package = Package(
                     "-Xlinker", "Sources/quill/Info.plist",
                 ]),
             ]
+        ),
+        .testTarget(
+            name: "QuillProcessTests",
+            dependencies: ["QuillProcess"]
+        ),
+        .testTarget(
+            name: "QuillSessionTests",
+            dependencies: ["QuillSession"]
         ),
     ]
 )

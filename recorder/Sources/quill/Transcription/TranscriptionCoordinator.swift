@@ -1,4 +1,5 @@
 import Foundation
+import QuillProcess
 
 /// Post-recording pipeline: a serial queue of session folders to transcribe.
 /// mic.caf → "me", system.caf → "them"; each track's segments are shifted by
@@ -72,15 +73,23 @@ actor TranscriptionCoordinator {
     }
 
     private func drain() async {
+        var timeoutRetries: [URL: Int] = [:]
         while !queue.isEmpty {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
             do {
                 try await transcribe(dir)
+                timeoutRetries.removeValue(forKey: dir)
                 notifyUser(title: "quill — transcript ready", body: dir.lastPathComponent)
                 runHook(for: dir)
             } catch {
                 log(dir, "transcription failed: \(error)")
+                if Self.isTimeout(error), timeoutRetries[dir, default: 0] == 0 {
+                    timeoutRetries[dir] = 1
+                    queue.append(dir)
+                    log(dir, "timeout — requeued once behind \(queue.count - 1) session(s)")
+                    continue
+                }
                 lastFailure = dir.lastPathComponent
                 notifyUser(
                     title: "quill — transcription failed",
@@ -114,6 +123,12 @@ actor TranscriptionCoordinator {
             let segments: [TranscriptSegment]
             do {
                 segments = try await engine.transcribe(audio)
+            } catch let error as ProcessRunnerError {
+                // A hung external tool is a session-level failure. The runner
+                // has already killed it; abort this session so the queue can
+                // move on and the retry path can try it once more later.
+                log(dir, "\(track.file) subprocess failed: \(error)")
+                throw error
             } catch {
                 log(dir, "skipping \(track.file): \(error)")
                 continue
@@ -183,6 +198,12 @@ actor TranscriptionCoordinator {
 
     private func publish(_ status: Status) {
         statusHandler?(status)
+    }
+
+    private static func isTimeout(_ error: Error) -> Bool {
+        guard let processError = error as? ProcessRunnerError else { return false }
+        if case .timedOut = processError { return true }
+        return false
     }
 }
 
