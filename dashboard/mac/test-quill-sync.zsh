@@ -113,4 +113,18 @@ zsh "$script_dir/quill-sync"
 rmdir "$QUILL_SYNC_LOCK"
 rm -f "$QUILL_SYNC_PENDING"
 
+# A dead owner is reclaimed immediately even when the lock is recent. The
+# replacement owner cleans up its own lock on exit.
+: > "$events"
+mkdir "$QUILL_SYNC_LOCK"
+printf '2147483647\n' > "$QUILL_SYNC_LOCK/owner-pid"
+set +e
+zsh "$script_dir/quill-sync"
+third_status=$?
+set -e
+[[ "$third_status" -eq 1 ]]
+[[ ! -e "$QUILL_SYNC_LOCK" ]]
+grep -q 'reclaimed sync lock from dead owner 2147483647' "$QUILL_SYNC_LOG"
+diff -u "$test_root/expected-second" "$events"
+
 echo "quill-sync regression OK"

@@ -29,6 +29,7 @@ RECORDINGS="${RECORDINGS:-$HOME/Recordings}"
 LOG="${QUILL_SYNC_LOG:-$HOME/.local/state/quill-sync.log}"
 LOCK="${QUILL_SYNC_LOCK:-$HOME/.local/state/quill-sync.lock}"
 PENDING="${QUILL_SYNC_PENDING:-$HOME/.local/state/quill-sync.pending}"
+LOCK_OWNER="$LOCK/owner-pid"
 RSYNC_BIN="${QUILL_RSYNC_BIN:-$(command -v rsync 2>/dev/null)}"
 SSH_BIN="${QUILL_SSH_BIN:-$(command -v ssh 2>/dev/null)}"
 SHASUM_BIN="${QUILL_SHASUM_BIN:-$(command -v shasum 2>/dev/null)}"
@@ -44,27 +45,49 @@ notify() {
   /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null
 }
 
-# Atomic lock; stale locks (>30 min) are reclaimed. A colliding invocation
-# leaves a pending flag so the lock owner runs another complete scan after it
-# releases the lock. That keeps an on-stop hook from being lost behind a slow
-# audio transfer.
-if ! mkdir "$LOCK" 2>/dev/null; then
-  if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]]; then
-    if rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK" 2>/dev/null; then
-      log "reclaimed stale sync lock"
-    else
-      : > "$PENDING"
-      log "lock contention; rescan requested"
-      exit 0
-    fi
-  else
+# Atomic PID-owned lock. Elapsed time cannot define staleness because a slow
+# multi-track upload can legitimately run for hours. A dead owner is reclaimed;
+# a live owner gets a pending flag and performs another scan before it exits.
+if mkdir "$LOCK" 2>/dev/null; then
+  printf '%s\n' "$$" > "$LOCK_OWNER"
+else
+  owner_pid=""
+  [[ -f "$LOCK_OWNER" ]] && owner_pid="$(<"$LOCK_OWNER")"
+  owner_alive=0
+  if [[ "$owner_pid" =~ '^[0-9]+$' ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    owner_alive=1
+  fi
+
+  # A missing owner can occur during the tiny mkdir/write window, or when an
+  # older uploader version owns the lock. Preserve the legacy 30-minute grace
+  # only for that upgrade case; all new locks use process liveness.
+  if (( owner_alive )) \
+      || { [[ -z "$owner_pid" ]] \
+           && [[ -z "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]]; }; then
     : > "$PENDING"
     log "another sync is running; rescan requested"
     exit 0
   fi
+
+  [[ -f "$LOCK_OWNER" ]] && rm -f "$LOCK_OWNER"
+  if rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" > "$LOCK_OWNER"
+    log "reclaimed sync lock from dead owner ${owner_pid:-legacy}"
+  else
+    : > "$PENDING"
+    log "lock contention; rescan requested"
+    exit 0
+  fi
 fi
 
-cleanup_lock() { rmdir "$LOCK" 2>/dev/null || true; }
+cleanup_lock() {
+  local owner_pid=""
+  [[ -f "$LOCK_OWNER" ]] && owner_pid="$(<"$LOCK_OWNER")"
+  if [[ "$owner_pid" == "$$" ]]; then
+    rm -f "$LOCK_OWNER"
+    rmdir "$LOCK" 2>/dev/null || true
+  fi
+}
 trap cleanup_lock EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT

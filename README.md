@@ -83,7 +83,9 @@ Linux server, and a ChatGPT subscription for the Codex CLI.
   Audio retries resumably over keepalive SSH, while per-meeting markers prevent
   historical work or one network timeout from blocking newer notes. A hook
   that collides with an active upload leaves a pending-rescan flag, so the new
-  transcript cannot be lost behind a long media transfer.
+  transcript cannot be lost behind a long media transfer. The lock follows its
+  owning process rather than a timer, so hours-long uploads stay serialized and
+  a crashed owner is reclaimed immediately.
 - Server-side notetaker failures persist a bounded retry deadline in SQLite.
   Authentication failures retry at an increasing interval (capped at hourly),
   transient failures retry five times, and `/api/health` reports pending,

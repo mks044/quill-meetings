@@ -172,9 +172,10 @@ Tell the operator, in their words:
   ingest has its own `.quill-ingested.sha256` marker and always happens before
   the independent audio phase, so notes do not wait on large media. Already
   compressed M4A audio is not recompressed by rsync. A colliding on-stop hook
-  leaves a pending-rescan flag that the active uploader consumes before exit.
-  An offline laptop self-heals without old work blocking new work. Run it by
-  hand any time.
+  leaves a pending-rescan flag that the active uploader consumes before exit;
+  the lock is PID-owned, so a long live transfer cannot be stolen by a timeout
+  and a dead owner is reclaimed. An offline laptop self-heals without old work
+  blocking new work. Run it by hand any time.
 - Ingest is idempotent; re-uploading a session does not duplicate it. Deleting a
   meeting in the UI tombstones it, so a later sync can't resurrect it.
 - Notetaker retry deadlines survive service restarts. Auth failures back off to
