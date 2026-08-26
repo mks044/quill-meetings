@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     tags_json TEXT,                   -- AI [str]
     ai_status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
     ai_error TEXT,
+    ai_attempts INTEGER NOT NULL DEFAULT 0,
+    ai_retry_at TEXT,
     segments_hash TEXT,
     has_audio_mic INTEGER NOT NULL DEFAULT 0,
     has_audio_system INTEGER NOT NULL DEFAULT 0,
@@ -105,6 +107,8 @@ def init() -> None:
             "ALTER TABLE actions ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'",
             "ALTER TABLE sessions ADD COLUMN has_audio_mixed INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE actions ADD COLUMN ru_text TEXT",
+            "ALTER TABLE sessions ADD COLUMN ai_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN ai_retry_at TEXT",
         ):
             try:
                 conn.execute(stmt)
@@ -153,7 +157,8 @@ def upsert_session(conn, session_id, started_at, duration_s, engine,
             "INSERT INTO segments_fts (text, session_id, idx) VALUES (?,?,?)",
             [(s["text"], session_id, i) for i, s in enumerate(segments)])
         conn.execute(
-            "UPDATE sessions SET ai_status='pending', ai_error=NULL, segments_hash=? WHERE id=?",
+            """UPDATE sessions SET ai_status='pending', ai_error=NULL,
+               ai_attempts=0, ai_retry_at=NULL, segments_hash=? WHERE id=?""",
             (new_hash, session_id))
 
 
@@ -181,7 +186,8 @@ def save_ai_artifacts(conn, session_id, art, expected_hash: str | None = None) -
 def _save_ai_artifacts(conn, session_id, art) -> None:
     conn.execute(
         """UPDATE sessions SET title=?, overview_md=?, outline_json=?,
-           keywords_json=?, tags_json=?, ai_status='done', ai_error=NULL
+           keywords_json=?, tags_json=?, ai_status='done', ai_error=NULL,
+           ai_attempts=0, ai_retry_at=NULL
            WHERE id=?""",
         (art["title"], art["overview_md"], json.dumps(art.get("outline", [])),
          json.dumps(art.get("keywords", [])), json.dumps(art.get("tags", [])),

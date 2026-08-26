@@ -28,6 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s
 log = logging.getLogger("quill.api")
 
 app = FastAPI(title="quill-dash", docs_url=None, openapi_url=None)
+_ai_retry_task: asyncio.Task | None = None
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 
@@ -142,17 +143,42 @@ def logout():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    with db.closing_conn() as conn:
+        row = conn.execute(
+            """SELECT
+                 sum(CASE WHEN ai_status='pending' THEN 1 ELSE 0 END) AS pending,
+                 sum(CASE WHEN ai_status='running' THEN 1 ELSE 0 END) AS running,
+                 sum(CASE WHEN ai_status='failed' THEN 1 ELSE 0 END) AS failed,
+                 sum(CASE WHEN ai_status='failed' AND ai_retry_at IS NOT NULL
+                          THEN 1 ELSE 0 END) AS retrying
+               FROM sessions"""
+        ).fetchone()
+    counts = {key: int(row[key] or 0) for key in ("pending", "running", "failed", "retrying")}
+    return {"ok": True, "notetaker_ok": counts["failed"] == 0, "notetaker": counts}
 
 
 @app.on_event("startup")
 async def startup() -> None:
+    global _ai_retry_task
     db.init()
     pending = ingest.scan_all()
     for sid in pending:
         ingest.schedule_ai(sid)
     if pending:
         log.info("startup: scheduled AI for %s", pending)
+    _ai_retry_task = asyncio.create_task(ingest.retry_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    global _ai_retry_task
+    if _ai_retry_task:
+        _ai_retry_task.cancel()
+        try:
+            await _ai_retry_task
+        except asyncio.CancelledError:
+            pass
+        _ai_retry_task = None
 
 
 # ---------------------------------------------------------------- sessions
@@ -232,7 +258,8 @@ async def ingest_endpoint(session_id: str):
 def session_status(session_id: str):
     with db.closing_conn() as conn:
         row = conn.execute(
-            "SELECT ai_status, ai_error FROM sessions WHERE id=?", (session_id,)).fetchone()
+            """SELECT ai_status, ai_error, ai_attempts, ai_retry_at
+               FROM sessions WHERE id=?""", (session_id,)).fetchone()
     if not row:
         raise HTTPException(404, "unknown session")
     return dict(row)
@@ -340,7 +367,9 @@ async def regenerate(session_id: str):
     with db.closing_conn() as conn:
         if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
             raise HTTPException(404, "unknown session")
-        conn.execute("UPDATE sessions SET ai_status='pending' WHERE id=?", (session_id,))
+        conn.execute(
+            """UPDATE sessions SET ai_status='pending', ai_error=NULL,
+               ai_attempts=0, ai_retry_at=NULL WHERE id=?""", (session_id,))
     started = ingest.schedule_ai(session_id)
     return {"scheduled": started}
 

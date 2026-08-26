@@ -14,6 +14,59 @@ log = logging.getLogger("quill.ingest")
 
 _ai_tasks: dict[str, asyncio.Task] = {}
 
+_AUTH_FAILURES = (
+    "access token", "refresh token", "authentication", "not logged in",
+    "log in again", "login required", "unauthorized",
+)
+_TRANSIENT_FAILURES = (
+    "timed out", "timeout", "connection", "temporarily unavailable",
+    "rate limit", "too many requests", "http 429", "http 500", "http 502",
+    "http 503", "http 504",
+)
+
+
+def retry_delay_seconds(error: str, attempt: int) -> int | None:
+    """Return a bounded retry delay for a failed notetaker run.
+
+    Authentication failures retry indefinitely but at most hourly: repairing
+    the server credential must recover stranded notes without a manual API
+    call. Network/service failures get five attempts. Unexpected model/output
+    failures get two automatic retries before remaining visibly failed.
+    """
+    message = error.lower()
+    exponent = max(0, attempt - 1)
+    if any(fragment in message for fragment in _AUTH_FAILURES):
+        return min(300 * (2 ** min(exponent, 4)), 3600)
+    if any(fragment in message for fragment in _TRANSIENT_FAILURES):
+        return min(60 * (2 ** min(exponent, 5)), 1800) if attempt <= 5 else None
+    return min(120 * (2 ** exponent), 900) if attempt <= 2 else None
+
+
+def _utc_after(seconds: int) -> str:
+    value = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def due_ai_sessions() -> list[str]:
+    """Return failed sessions whose persisted retry deadline has arrived."""
+    with db.closing_conn() as conn:
+        rows = conn.execute(
+            """SELECT id FROM sessions
+               WHERE ai_status='failed' AND ai_retry_at IS NOT NULL
+                 AND datetime(ai_retry_at) <= datetime('now')
+               ORDER BY started_at"""
+        ).fetchall()
+    return [row["id"] for row in rows]
+
+
+async def retry_loop(poll_seconds: int = 60) -> None:
+    """Persisted retry worker; safe across dashboard restarts."""
+    while True:
+        for session_id in due_ai_sessions():
+            if schedule_ai(session_id):
+                log.info("retry deadline reached for %s", session_id)
+        await asyncio.sleep(poll_seconds)
+
 
 def parse_started_at(session_id: str) -> str:
     # quill dir names: 2026.07.29-0114  (local time HHMM)
@@ -83,14 +136,19 @@ def schedule_ai(session_id: str) -> bool:
 async def _ai_pipeline(session_id: str) -> None:
     with db.closing_conn() as conn:
         conn.execute(
-            "UPDATE sessions SET ai_status='running', ai_error=NULL WHERE id=?",
+            """UPDATE sessions SET ai_status='running', ai_error=NULL,
+               ai_retry_at=NULL, ai_attempts=ai_attempts+1 WHERE id=?""",
             (session_id,))
+        session = conn.execute(
+            "SELECT started_at, ai_attempts FROM sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        if not session:
+            return
         rows = conn.execute(
             "SELECT speaker, start_ms, end_ms, text FROM segments"
             " WHERE session_id=? ORDER BY idx", (session_id,)).fetchall()
-        started_at = conn.execute(
-            "SELECT started_at FROM sessions WHERE id=?", (session_id,)
-        ).fetchone()["started_at"]
+        started_at = session["started_at"]
+        attempt = session["ai_attempts"]
     segments = [dict(r) for r in rows]
     run_hash = db.segments_hash(segments)
     if not segments:
@@ -107,14 +165,20 @@ async def _ai_pipeline(session_id: str) -> None:
             log.info("AI artifacts done for %s", session_id)
         else:
             log.info("transcript changed mid-run for %s — rescheduling", session_id)
-            schedule_ai(session_id)
+            asyncio.get_running_loop().call_later(0.1, schedule_ai, session_id)
             return
     except Exception as e:  # noqa: BLE001 — status must always land in the DB
         log.exception("AI pipeline failed for %s", session_id)
+        error = str(e)[:500]
+        delay = retry_delay_seconds(error, attempt)
+        retry_at = _utc_after(delay) if delay is not None else None
         with db.closing_conn() as conn:
             conn.execute(
-                "UPDATE sessions SET ai_status='failed', ai_error=? WHERE id=?",
-                (str(e)[:500], session_id))
+                """UPDATE sessions SET ai_status='failed', ai_error=?,
+                   ai_retry_at=? WHERE id=?""",
+                (error, retry_at, session_id))
+        if retry_at:
+            log.warning("notetaker retry for %s scheduled at %s", session_id, retry_at)
 
 
 def scan_all() -> list[str]:
@@ -137,8 +201,12 @@ def scan_all() -> list[str]:
             continue
         with db.closing_conn() as conn:
             st = conn.execute(
-                "SELECT ai_status FROM sessions WHERE id=?", (sdir.name,)
+                "SELECT ai_status, ai_retry_at FROM sessions WHERE id=?", (sdir.name,)
             ).fetchone()
-            if st and st["ai_status"] in ("pending", "failed"):
+            retry_due = (st and st["ai_status"] == "failed"
+                         and (st["ai_retry_at"] is None
+                              or st["ai_retry_at"] <= dt.datetime.now(
+                                  dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))
+            if st and (st["ai_status"] == "pending" or retry_due):
                 pending.append(sdir.name)
     return pending

@@ -31,6 +31,10 @@ the upload hook never runs.
    isolation keep old or offline work from blocking the newest meeting. Split
    transcript ingest from audio delivery so notes become visible first and
    partial media resumes independently.
+7. Persist notetaker attempt counts and retry deadlines. Retry credential
+   failures with capped backoff, bound transient/model retries, and expose
+   aggregate notetaker health so failures cannot remain silent or require a
+   manual re-ingest after credentials recover.
 
 ## Files
 
@@ -44,6 +48,10 @@ the upload hook never runs.
 - `recorder/Tests/QuillSessionTests/SessionManifestTests.swift`
 - `dashboard/mac/quill-sync`
 - `dashboard/mac/test-quill-sync.zsh`
+- `dashboard/app/db.py`
+- `dashboard/app/ingest.py`
+- `dashboard/app/main.py`
+- `dashboard/test_reliability.py`
 - `README.md`, `SETUP.md`, and `AGENTS.md`
 
 ## Verification and deployment

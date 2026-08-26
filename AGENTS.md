@@ -76,8 +76,8 @@ systemd user service **bound to 127.0.0.1:7435** — not exposed to any network
 until you deliberately expose it in Phase 4.
 
 **Check:** `ssh user@host 'curl -fsS http://127.0.0.1:7435/api/health'` returns
-`{"ok":true}`, and `ssh user@host 'systemctl --user is-active quill-dash'` says
-`active`.
+JSON with `"ok":true` and `"notetaker_ok":true`, and
+`ssh user@host 'systemctl --user is-active quill-dash'` says `active`.
 
 ## Phase 3 — Link them (run on the Mac)
 
@@ -168,10 +168,18 @@ Tell the operator, in their words:
   times over keepalive SSH, and continues past per-session failures. Transcript
   ingest has its own `.quill-ingested.sha256` marker and always happens before
   the independent audio phase, so notes do not wait on large media. Already
-  compressed M4A audio is not recompressed by rsync. An offline laptop self-
-  heals without old work blocking new work. Run it by hand any time.
+  compressed M4A audio is not recompressed by rsync. A colliding on-stop hook
+  leaves a pending-rescan flag that the active uploader consumes before exit.
+  An offline laptop self-heals without old work blocking new work. Run it by
+  hand any time.
 - Ingest is idempotent; re-uploading a session does not duplicate it. Deleting a
   meeting in the UI tombstones it, so a later sync can't resurrect it.
+- Notetaker retry deadlines survive service restarts. Auth failures back off to
+  hourly retries, transient failures retry five times, and unexpected output
+  failures retry twice. `/api/health` exposes only aggregate notetaker counts.
+  `codex login status` checks cached state, not a live model request; if the
+  error says a refresh token was used, run `codex login --device-auth` on that
+  server. The retry worker finishes stranded notes after the credential changes.
 - The dashboard has no user accounts — one shared password (or none). Share
   links are unguessable tokens scoped to a single meeting.
 - Model calls are serialized on the server; a long summary never blocks

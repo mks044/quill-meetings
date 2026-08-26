@@ -79,7 +79,13 @@ Linux server, and a ChatGPT subscription for the Codex CLI.
 - The uploader works newest-first, records the transcript hash after successful
   ingest, and makes notes visible before starting the independent audio phase.
   Audio retries resumably over keepalive SSH, while per-meeting markers prevent
-  historical work or one network timeout from blocking newer notes.
+  historical work or one network timeout from blocking newer notes. A hook
+  that collides with an active upload leaves a pending-rescan flag, so the new
+  transcript cannot be lost behind a long media transfer.
+- Server-side notetaker failures persist a bounded retry deadline in SQLite.
+  Authentication failures retry at an increasing interval (capped at hourly),
+  transient failures retry five times, and `/api/health` reports pending,
+  running, failed, and retrying counts without exposing meeting content.
 
 ## License
 
