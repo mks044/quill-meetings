@@ -76,6 +76,9 @@ Linux server, and a ChatGPT subscription for the Codex CLI.
 - Transcripts are written atomically; the upload hook runs only after a complete
   transcript exists, and startup rescans every finalized-but-untranscribed
   session.
+- The uploader works newest-first, records the transcript hash after successful
+  ingest, and isolates failures per meeting. Historical sessions are not
+  repeatedly uploaded and one network timeout cannot block newer notes.
 
 ## License
 

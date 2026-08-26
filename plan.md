@@ -26,6 +26,9 @@ the upload hook never runs.
    cannot block later recordings and a transient sleep/wake failure self-heals.
 5. Add regression tests for output larger than pipe capacity, stderr capture,
    non-zero exit status, and timeout termination.
+6. Make the uploader a durable newest-first outbox: transcript-hash markers,
+   remote hash bootstrapping, resumable transfers, and per-session failure
+   isolation keep old or offline work from blocking the newest meeting.
 
 ## Files
 
@@ -37,6 +40,8 @@ the upload hook never runs.
 - `recorder/Sources/quill/Transcription/TranscriptionCoordinator.swift`
 - `recorder/Tests/QuillProcessTests/ProcessRunnerTests.swift`
 - `recorder/Tests/QuillSessionTests/SessionManifestTests.swift`
+- `dashboard/mac/quill-sync`
+- `dashboard/mac/test-quill-sync.zsh`
 - `README.md`, `SETUP.md`, and `AGENTS.md`
 
 ## Verification and deployment

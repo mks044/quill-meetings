@@ -162,8 +162,11 @@ Tell the operator, in their words:
   pipes. Whisper has a 30-minute watchdog (override with
   `QUILL_WHISPER_TIMEOUT_SECONDS`); a timeout is killed, moved behind later
   sessions, and retried once, so one bad recording cannot wedge the queue.
-- `quill-sync` is catch-up by design — every run uploads *everything* not yet
-  synced, so an offline laptop self-heals. Run it by hand any time.
+- `quill-sync` is catch-up by design — every run checks completed transcripts
+  newest-first, skips matching `.quill-synced.sha256` markers, bootstraps old
+  markers from the remote transcript hash, and continues past per-session
+  failures. An offline laptop self-heals without old work blocking new work.
+  Run it by hand any time.
 - Ingest is idempotent; re-uploading a session does not duplicate it. Deleting a
   meeting in the UI tombstones it, so a later sync can't resurrect it.
 - The dashboard has no user accounts — one shared password (or none). Share

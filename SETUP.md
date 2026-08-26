@@ -153,7 +153,7 @@ a laptop that was offline catches up on its own.
 | Symptom | Cause / fix |
 |---|---|
 | Recordings are silent | System Audio Recording permission not granted to the app bundle |
-| Meeting never appears | Check its local `transcribe.log`, then `~/.local/state/quill-sync.log`; run `quill-sync` manually only after `transcript.json` exists |
+| Meeting never appears | Check its local `transcribe.log`, then `~/.local/state/quill-sync.log`; run `quill-sync` manually only after `transcript.json` exists. Sync continues past other failed meetings and retries them next run. |
 | Transcription timed out | Quill kills it, processes later sessions, then retries once; override the 30-minute watchdog with `QUILL_WHISPER_TIMEOUT_SECONDS` only for unusually slow hardware |
 | "AI failed" on a meeting | `codex login status` on the server; `journalctl --user -u quill-dash -n 50` |
 | AI failed with a model error | Your Codex CLI is old: `npm i -g @openai/codex@latest` |

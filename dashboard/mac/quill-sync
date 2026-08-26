@@ -1,9 +1,9 @@
 #!/bin/zsh
 # quill-sync — push finished quill sessions to the quill-dash server.
 # Fired by quill's on_stop hook (session dir as $1) and safe to run bare:
-# every invocation syncs ALL local sessions that have a transcript, so a
-# failed/offline run self-heals on the next stop. Loud on failure (macOS
-# notification) — silent sync failures are how meetings get lost.
+# every invocation checks every local transcript newest-first. A transcript
+# hash marker skips completed work; remote hash probing bootstraps markers on
+# upgrades. One failed session never prevents later sessions from uploading.
 #
 # Concurrency: an atomic lock dir serializes overlapping invocations (hook
 # firing while a manual run is live). Transcodes go to a temp name + atomic
@@ -26,12 +26,20 @@ REMOTE="${REMOTE:-}"
 REMOTE_DIR="${REMOTE_DIR:-/home/$(whoami)/quill-data/sessions}"
 DASH_URL="${DASH_URL:-http://localhost:7435}"
 RECORDINGS="${RECORDINGS:-$HOME/Recordings}"
-LOG="$HOME/.local/state/quill-sync.log"
-LOCK="$HOME/.local/state/quill-sync.lock"
+LOG="${QUILL_SYNC_LOG:-$HOME/.local/state/quill-sync.log}"
+LOCK="${QUILL_SYNC_LOCK:-$HOME/.local/state/quill-sync.lock}"
+RSYNC_BIN="${QUILL_RSYNC_BIN:-$(command -v rsync 2>/dev/null)}"
+SSH_BIN="${QUILL_SSH_BIN:-$(command -v ssh 2>/dev/null)}"
+SHASUM_BIN="${QUILL_SHASUM_BIN:-$(command -v shasum 2>/dev/null)}"
+FFMPEG_BIN="${QUILL_FFMPEG_BIN:-$(command -v ffmpeg 2>/dev/null)}"
+AFCONVERT_BIN="${QUILL_AFCONVERT_BIN:-/usr/bin/afconvert}"
 mkdir -p "$(dirname "$LOG")"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-notify() { /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null }
+notify() {
+  [[ "${QUILL_NO_NOTIFY:-0}" == 1 ]] && return
+  /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null
+}
 
 # Atomic lock; stale locks (>30 min) are reclaimed.
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -49,12 +57,14 @@ fail() {
   exit 1
 }
 
-command -v rsync >/dev/null || fail "rsync missing"
+[[ -n "$RSYNC_BIN" && -x "$RSYNC_BIN" ]] || fail "rsync missing"
+[[ -n "$SSH_BIN" && -x "$SSH_BIN" ]] || fail "ssh missing"
+[[ -n "$SHASUM_BIN" && -x "$SHASUM_BIN" ]] || fail "shasum missing"
 [[ -n "$REMOTE" ]] || fail "no REMOTE configured (see $CONF)"
 
 transcode() {  # $1 src.caf  $2 dst.m4a
   local tmp="$2.tmp-$$.m4a"
-  if /usr/bin/afconvert -f m4af -d aac -b 64000 "$1" "$tmp" 2>> "$LOG"; then
+  if "$AFCONVERT_BIN" -f m4af -d aac -b 64000 "$1" "$tmp" 2>> "$LOG"; then
     mv -f "$tmp" "$2"
   else
     rm -f "$tmp"; return 1
@@ -62,45 +72,75 @@ transcode() {  # $1 src.caf  $2 dst.m4a
 }
 
 synced=0
-for dir in "$RECORDINGS"/*(N/); do
+skipped=0
+failed=0
+for dir in "$RECORDINGS"/*(N/On); do
   id="${dir:t}"
   [[ -f "$dir/transcript.json" ]] || continue
+  marker="$dir/.quill-synced.sha256"
+  local_hash=$("$SHASUM_BIN" -a 256 "$dir/transcript.json" | awk '{print $1}')
 
-  for track in mic system; do
-    if [[ -f "$dir/$track.caf" && ! -f "$dir/$track.m4a" ]]; then
-      transcode "$dir/$track.caf" "$dir/$track.m4a" \
-        || log "afconvert failed for $id/$track (that track won't play in the dashboard)"
+  if [[ -f "$marker" && "$(<"$marker")" == "$local_hash" ]]; then
+    skipped=$((skipped+1))
+    continue
+  fi
+
+  # Upgrade/bootstrap path: if the identical transcript is already remote,
+  # avoid uploading historical audio again. We still ping ingest below so a
+  # copied-but-not-indexed session self-heals.
+  remote_hash=$("$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
+    "sha256sum '$REMOTE_DIR/$id/transcript.json' 2>/dev/null | cut -d' ' -f1" \
+    2>> "$LOG" || true)
+
+  if [[ "$remote_hash" != "$local_hash" ]]; then
+    for track in mic system; do
+      if [[ -f "$dir/$track.caf" && ! -f "$dir/$track.m4a" ]]; then
+        transcode "$dir/$track.caf" "$dir/$track.m4a" \
+          || log "afconvert failed for $id/$track (that track won't play in the dashboard)"
+      fi
+    done
+
+    # Mixed track (both sides in one stream) — dashboard default playback.
+    if [[ -f "$dir/mic.caf" && -f "$dir/system.caf" && ! -f "$dir/mixed.m4a" \
+          && -n "$FFMPEG_BIN" && -x "$FFMPEG_BIN" ]]; then
+      tmpmix="$dir/mixed.tmp-$$.m4a"
+      if "$FFMPEG_BIN" -hide_banner -loglevel error -y \
+           -i "$dir/mic.caf" -i "$dir/system.caf" \
+           -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=1" \
+           -c:a aac -b:a 96k "$tmpmix" 2>> "$LOG"; then
+        mv -f "$tmpmix" "$dir/mixed.m4a"
+      else
+        rm -f "$tmpmix"; log "ffmpeg mix failed for $id (falling back to separate tracks)"
+      fi
     fi
-  done
 
-  # Mixed track (both sides in one stream) — the dashboard's default playback.
-  if [[ -f "$dir/mic.caf" && -f "$dir/system.caf" && ! -f "$dir/mixed.m4a" ]] \
-     && command -v ffmpeg >/dev/null; then
-    tmpmix="$dir/mixed.tmp-$$.m4a"
-    if ffmpeg -hide_banner -loglevel error -y \
-         -i "$dir/mic.caf" -i "$dir/system.caf" \
-         -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=1" \
-         -c:a aac -b:a 96k "$tmpmix" 2>> "$LOG"; then
-      mv -f "$tmpmix" "$dir/mixed.m4a"
-    else
-      rm -f "$tmpmix"; log "ffmpeg mix failed for $id (falling back to separate tracks)"
+    if ! "$RSYNC_BIN" -az --timeout=120 --partial-dir=.rsync-partial \
+      --include="transcript.json" --include="meta.json" --include="*.m4a" \
+      --include="transcribe.log" --exclude="*" \
+      "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
+      log "FAIL: rsync $id (will retry without blocking other sessions)"
+      failed=$((failed+1))
+      continue
     fi
   fi
 
-  rsync -az --timeout=30 \
-    --include="transcript.json" --include="meta.json" --include="*.m4a" \
-    --include="transcribe.log" --exclude="*" \
-    "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1 \
-    || fail "rsync $id (server unreachable?)"
-
-  if ! ssh -o ConnectTimeout=10 "$REMOTE" \
+  if ! "$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
       "curl -fsS --max-time 30 -X POST $DASH_URL/api/ingest/$id -o /dev/null" >> "$LOG" 2>&1; then
     log "ingest ping FAILED for $id"
     notify "quill sync" "$id uploaded but ingest failed — dashboard will catch up on restart"
+    failed=$((failed+1))
+    continue
   fi
 
+  marker_tmp="$marker.tmp-$$"
+  printf '%s\n' "$local_hash" > "$marker_tmp"
+  mv -f "$marker_tmp" "$marker"
   synced=$((synced+1))
   log "synced $id"
 done
 
-log "done — $synced session(s) checked"
+log "done — synced=$synced skipped=$skipped failed=$failed"
+if (( failed > 0 )); then
+  notify "quill sync incomplete" "$failed session(s) will retry on the next run"
+  exit 1
+fi
