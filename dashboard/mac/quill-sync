@@ -28,6 +28,7 @@ DASH_URL="${DASH_URL:-http://localhost:7435}"
 RECORDINGS="${RECORDINGS:-$HOME/Recordings}"
 LOG="${QUILL_SYNC_LOG:-$HOME/.local/state/quill-sync.log}"
 LOCK="${QUILL_SYNC_LOCK:-$HOME/.local/state/quill-sync.lock}"
+PENDING="${QUILL_SYNC_PENDING:-$HOME/.local/state/quill-sync.pending}"
 RSYNC_BIN="${QUILL_RSYNC_BIN:-$(command -v rsync 2>/dev/null)}"
 SSH_BIN="${QUILL_SSH_BIN:-$(command -v ssh 2>/dev/null)}"
 SHASUM_BIN="${QUILL_SHASUM_BIN:-$(command -v shasum 2>/dev/null)}"
@@ -35,6 +36,7 @@ FFMPEG_BIN="${QUILL_FFMPEG_BIN:-$(command -v ffmpeg 2>/dev/null)}"
 AFCONVERT_BIN="${QUILL_AFCONVERT_BIN:-/usr/bin/afconvert}"
 RETRY_DELAY="${QUILL_SYNC_RETRY_DELAY:-3}"
 mkdir -p "$(dirname "$LOG")"
+mkdir -p "$(dirname "$PENDING")"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 notify() {
@@ -42,15 +44,31 @@ notify() {
   /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null
 }
 
-# Atomic lock; stale locks (>30 min) are reclaimed.
+# Atomic lock; stale locks (>30 min) are reclaimed. A colliding invocation
+# leaves a pending flag so the lock owner runs another complete scan after it
+# releases the lock. That keeps an on-stop hook from being lost behind a slow
+# audio transfer.
 if ! mkdir "$LOCK" 2>/dev/null; then
   if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]]; then
-    rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || { log "lock contention, exiting"; exit 0 }
+    if rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK" 2>/dev/null; then
+      log "reclaimed stale sync lock"
+    else
+      : > "$PENDING"
+      log "lock contention; rescan requested"
+      exit 0
+    fi
   else
-    log "another sync is running, exiting"; exit 0
+    : > "$PENDING"
+    log "another sync is running; rescan requested"
+    exit 0
   fi
 fi
-trap 'rm -rf "$LOCK"' EXIT
+
+cleanup_lock() { rmdir "$LOCK" 2>/dev/null || true; }
+trap cleanup_lock EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() {
   log "FAIL: $1"
@@ -185,6 +203,18 @@ for dir in "$RECORDINGS"/*(N/On); do
 done
 
 log "done — ingested=$ingested synced=$synced skipped=$skipped failed=$failed"
+
+# Release before checking the flag. A new invocation now either acquires the
+# lock and performs the scan itself, or had already collided and left PENDING.
+# This ordering avoids a check-then-unlock window that could strand a session.
+cleanup_lock
+trap - EXIT HUP INT TERM
+if [[ -f "$PENDING" ]]; then
+  rm -f "$PENDING"
+  log "running requested rescan"
+  exec "$0" "$@"
+fi
+
 if (( failed > 0 )); then
   notify "quill sync incomplete" "$failed session(s) will retry on the next run"
   exit 1

@@ -53,6 +53,7 @@ EOF
 export QUILL_SYNC_CONF="$config"
 export QUILL_SYNC_LOG="$test_root/sync.log"
 export QUILL_SYNC_LOCK="$test_root/sync.lock"
+export QUILL_SYNC_PENDING="$test_root/sync.pending"
 export QUILL_RSYNC_BIN="$fake_bin/rsync"
 export QUILL_SSH_BIN="$fake_bin/ssh"
 export QUILL_SHASUM_BIN="/usr/bin/shasum"
@@ -98,5 +99,16 @@ audio 2026.08.02-1000
 audio 2026.08.02-1000
 EOF
 diff -u "$test_root/expected-second" "$events"
+
+# An invocation that collides with a live sync must schedule a complete rescan
+# instead of silently losing the on-stop event. It must not disturb the lock.
+: > "$events"
+mkdir "$QUILL_SYNC_LOCK"
+zsh "$script_dir/quill-sync"
+[[ -d "$QUILL_SYNC_LOCK" ]]
+[[ -f "$QUILL_SYNC_PENDING" ]]
+[[ ! -s "$events" ]]
+rmdir "$QUILL_SYNC_LOCK"
+rm -f "$QUILL_SYNC_PENDING"
 
 echo "quill-sync regression OK"
