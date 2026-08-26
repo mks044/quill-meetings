@@ -23,8 +23,11 @@ cat > "$fake_bin/rsync" <<'STUB'
 #!/bin/zsh
 source_dir="${${@[-2]}%/}"
 id="${source_dir:t}"
-print -r -- "rsync $id" >> "$QUILL_TEST_EVENTS"
-[[ "$id" == 2026.08.02-1000 ]] && exit 23
+command_line="$*"
+phase=metadata
+[[ "$command_line" == *'--include=*.m4a'* ]] && phase=audio
+print -r -- "$phase $id" >> "$QUILL_TEST_EVENTS"
+[[ "$phase" == audio && "$id" == 2026.08.02-1000 ]] && exit 23
 exit 0
 STUB
 
@@ -64,19 +67,24 @@ set -e
 [[ "$first_status" -eq 1 ]]
 
 cat > "$test_root/expected-first" <<'EOF'
-rsync 2026.08.03-1000
+metadata 2026.08.03-1000
 ingest 2026.08.03-1000
-rsync 2026.08.02-1000
-rsync 2026.08.02-1000
-rsync 2026.08.02-1000
-rsync 2026.08.01-1000
+audio 2026.08.03-1000
+metadata 2026.08.02-1000
+ingest 2026.08.02-1000
+audio 2026.08.02-1000
+audio 2026.08.02-1000
+audio 2026.08.02-1000
+metadata 2026.08.01-1000
 ingest 2026.08.01-1000
+audio 2026.08.01-1000
 EOF
 diff -u "$test_root/expected-first" "$events"
 
 [[ -f "$recordings/2026.08.03-1000/.quill-synced.sha256" ]]
 [[ ! -f "$recordings/2026.08.02-1000/.quill-synced.sha256" ]]
 [[ -f "$recordings/2026.08.01-1000/.quill-synced.sha256" ]]
+[[ -f "$recordings/2026.08.02-1000/.quill-ingested.sha256" ]]
 
 : > "$events"
 set +e
@@ -85,9 +93,9 @@ second_status=$?
 set -e
 [[ "$second_status" -eq 1 ]]
 cat > "$test_root/expected-second" <<'EOF'
-rsync 2026.08.02-1000
-rsync 2026.08.02-1000
-rsync 2026.08.02-1000
+audio 2026.08.02-1000
+audio 2026.08.02-1000
+audio 2026.08.02-1000
 EOF
 diff -u "$test_root/expected-second" "$events"
 

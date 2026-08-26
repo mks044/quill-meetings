@@ -28,7 +28,9 @@ the upload hook never runs.
    non-zero exit status, and timeout termination.
 6. Make the uploader a durable newest-first outbox: transcript-hash markers,
    remote hash bootstrapping, resumable transfers, and per-session failure
-   isolation keep old or offline work from blocking the newest meeting.
+   isolation keep old or offline work from blocking the newest meeting. Split
+   transcript ingest from audio delivery so notes become visible first and
+   partial media resumes independently.
 
 ## Files
 

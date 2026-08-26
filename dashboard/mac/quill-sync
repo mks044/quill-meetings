@@ -72,13 +72,21 @@ transcode() {  # $1 src.caf  $2 dst.m4a
   fi
 }
 
+write_marker() {  # $1 marker path  $2 transcript hash
+  local marker_tmp="$1.tmp-$$"
+  printf '%s\n' "$2" > "$marker_tmp"
+  mv -f "$marker_tmp" "$1"
+}
+
 synced=0
+ingested=0
 skipped=0
 failed=0
 for dir in "$RECORDINGS"/*(N/On); do
   id="${dir:t}"
   [[ -f "$dir/transcript.json" ]] || continue
   marker="$dir/.quill-synced.sha256"
+  ingest_marker="$dir/.quill-ingested.sha256"
   local_hash=$("$SHASUM_BIN" -a 256 "$dir/transcript.json" | awk '{print $1}')
 
   if [[ -f "$marker" && "$(<"$marker")" == "$local_hash" ]]; then
@@ -86,71 +94,97 @@ for dir in "$RECORDINGS"/*(N/On); do
     continue
   fi
 
-  # Upgrade/bootstrap path: if the identical transcript is already remote,
-  # avoid uploading historical audio again. We still ping ingest below so a
-  # copied-but-not-indexed session self-heals.
-  remote_hash=$("$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
-    "sha256sum '$REMOTE_DIR/$id/transcript.json' 2>/dev/null | cut -d' ' -f1" \
-    2>> "$LOG" || true)
+  # Phase 1: make notes visible before moving large audio. A separate ingest
+  # marker lets later runs skip this phase while incomplete audio resumes.
+  if [[ ! -f "$ingest_marker" || "$(<"$ingest_marker")" != "$local_hash" ]]; then
+    remote_hash=$("$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
+      "sha256sum '$REMOTE_DIR/$id/transcript.json' 2>/dev/null | cut -d' ' -f1" \
+      2>> "$LOG" || true)
 
-  if [[ "$remote_hash" != "$local_hash" ]]; then
-    for track in mic system; do
-      if [[ -f "$dir/$track.caf" && ! -f "$dir/$track.m4a" ]]; then
-        transcode "$dir/$track.caf" "$dir/$track.m4a" \
-          || log "afconvert failed for $id/$track (that track won't play in the dashboard)"
-      fi
-    done
-
-    # Mixed track (both sides in one stream) — dashboard default playback.
-    if [[ -f "$dir/mic.caf" && -f "$dir/system.caf" && ! -f "$dir/mixed.m4a" \
-          && -n "$FFMPEG_BIN" && -x "$FFMPEG_BIN" ]]; then
-      tmpmix="$dir/mixed.tmp-$$.m4a"
-      if "$FFMPEG_BIN" -hide_banner -loglevel error -y \
-           -i "$dir/mic.caf" -i "$dir/system.caf" \
-           -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=1" \
-           -c:a aac -b:a 96k "$tmpmix" 2>> "$LOG"; then
-        mv -f "$tmpmix" "$dir/mixed.m4a"
-      else
-        rm -f "$tmpmix"; log "ffmpeg mix failed for $id (falling back to separate tracks)"
+    if [[ "$remote_hash" != "$local_hash" ]]; then
+      metadata_ok=0
+      for attempt in 1 2 3; do
+        if "$RSYNC_BIN" -a --timeout=120 --partial-dir=.rsync-partial \
+          -e "$SSH_BIN -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8" \
+          --include="transcript.json" --include="meta.json" \
+          --include="transcribe.log" --exclude="*" \
+          "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
+          metadata_ok=1
+          break
+        fi
+        log "metadata rsync $id attempt $attempt/3 failed"
+        (( attempt < 3 && RETRY_DELAY > 0 )) && sleep $((RETRY_DELAY * attempt))
+      done
+      if (( ! metadata_ok )); then
+        log "FAIL: metadata rsync $id (will retry without blocking other sessions)"
+        failed=$((failed+1))
+        continue
       fi
     fi
 
-    upload_ok=0
-    for attempt in 1 2 3; do
-      if "$RSYNC_BIN" -a --timeout=120 --partial-dir=.rsync-partial \
-        -e "$SSH_BIN -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8" \
-        --include="transcript.json" --include="meta.json" --include="*.m4a" \
-        --include="transcribe.log" --exclude="*" \
-        "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
-        upload_ok=1
-        break
-      fi
-      log "rsync $id attempt $attempt/3 failed"
-      (( attempt < 3 && RETRY_DELAY > 0 )) && sleep $((RETRY_DELAY * attempt))
-    done
-    if (( ! upload_ok )); then
-      log "FAIL: rsync $id (will retry without blocking other sessions)"
+    if ! "$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
+        "curl -fsS --max-time 30 -X POST $DASH_URL/api/ingest/$id -o /dev/null" >> "$LOG" 2>&1; then
+      log "ingest ping FAILED for $id"
+      notify "quill sync" "$id transcript uploaded but ingest failed — will retry"
       failed=$((failed+1))
       continue
     fi
+    write_marker "$ingest_marker" "$local_hash"
+    ingested=$((ingested+1))
+    log "ingested $id"
   fi
 
-  if ! "$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
-      "curl -fsS --max-time 30 -X POST $DASH_URL/api/ingest/$id -o /dev/null" >> "$LOG" 2>&1; then
-    log "ingest ping FAILED for $id"
-    notify "quill sync" "$id uploaded but ingest failed — dashboard will catch up on restart"
-    failed=$((failed+1))
-    continue
+  # Phase 2: audio is independent and resumable. Notes remain available even
+  # when a slow network leaves this phase for the next invocation.
+  for track in mic system; do
+    if [[ -f "$dir/$track.caf" && ! -f "$dir/$track.m4a" ]]; then
+      transcode "$dir/$track.caf" "$dir/$track.m4a" \
+        || log "afconvert failed for $id/$track (that track won't play in the dashboard)"
+    fi
+  done
+
+  if [[ -f "$dir/mic.caf" && -f "$dir/system.caf" && ! -f "$dir/mixed.m4a" \
+        && -n "$FFMPEG_BIN" && -x "$FFMPEG_BIN" ]]; then
+    tmpmix="$dir/mixed.tmp-$$.m4a"
+    if "$FFMPEG_BIN" -hide_banner -loglevel error -y \
+         -i "$dir/mic.caf" -i "$dir/system.caf" \
+         -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=1" \
+         -c:a aac -b:a 96k "$tmpmix" 2>> "$LOG"; then
+      mv -f "$tmpmix" "$dir/mixed.m4a"
+    else
+      rm -f "$tmpmix"; log "ffmpeg mix failed for $id (falling back to separate tracks)"
+    fi
   fi
 
-  marker_tmp="$marker.tmp-$$"
-  printf '%s\n' "$local_hash" > "$marker_tmp"
-  mv -f "$marker_tmp" "$marker"
+  audio_files=("$dir"/*.m4a(N))
+  if (( ${#audio_files} > 0 )); then
+    audio_ok=0
+    for attempt in 1 2 3; do
+      if "$RSYNC_BIN" -a --timeout=120 --partial-dir=.rsync-partial \
+        -e "$SSH_BIN -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8" \
+        --include="*.m4a" --exclude="*" \
+        "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
+        audio_ok=1
+        break
+      fi
+      log "audio rsync $id attempt $attempt/3 failed"
+      (( attempt < 3 && RETRY_DELAY > 0 )) && sleep $((RETRY_DELAY * attempt))
+    done
+    if (( ! audio_ok )); then
+      log "FAIL: audio rsync $id (notes are live; audio will resume next run)"
+      failed=$((failed+1))
+      continue
+    fi
+  else
+    log "no playable audio for $id"
+  fi
+
+  write_marker "$marker" "$local_hash"
   synced=$((synced+1))
   log "synced $id"
 done
 
-log "done — synced=$synced skipped=$skipped failed=$failed"
+log "done — ingested=$ingested synced=$synced skipped=$skipped failed=$failed"
 if (( failed > 0 )); then
   notify "quill sync incomplete" "$failed session(s) will retry on the next run"
   exit 1

@@ -77,9 +77,9 @@ Linux server, and a ChatGPT subscription for the Codex CLI.
   transcript exists, and startup rescans every finalized-but-untranscribed
   session.
 - The uploader works newest-first, records the transcript hash after successful
-  ingest, retries resumable transfers over keepalive SSH, and isolates failures
-  per meeting. Historical sessions are not repeatedly uploaded and one network
-  timeout cannot block newer notes.
+  ingest, and makes notes visible before starting the independent audio phase.
+  Audio retries resumably over keepalive SSH, while per-meeting markers prevent
+  historical work or one network timeout from blocking newer notes.
 
 ## License
 
