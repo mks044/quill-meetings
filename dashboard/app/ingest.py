@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import math
 from pathlib import Path
 
 from . import ai, config, db
@@ -73,7 +74,16 @@ async def retry_loop(poll_seconds: int = 60) -> None:
         await asyncio.sleep(poll_seconds)
 
 
-def parse_started_at(session_id: str) -> str:
+def parse_started_at(session_id: str, metadata_value: str | None = None) -> str:
+    # The manifest timestamp is an exact ISO8601 instant. Folder names use the
+    # Mac's wall clock and have no offset, so they are only a legacy fallback.
+    if metadata_value:
+        try:
+            parsed = dt.datetime.fromisoformat(metadata_value.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                return parsed.isoformat()
+        except (TypeError, ValueError):
+            pass
     # quill dir names: 2026.07.29-0114  (local time HHMM)
     try:
         d = dt.datetime.strptime(session_id[:15], "%Y.%m.%d-%H%M")
@@ -88,16 +98,29 @@ def read_session_dir(session_id: str) -> dict | None:
     if not tpath.exists():
         return None
     t = json.loads(tpath.read_text())
+    metadata = {}
+    mpath = sdir / "meta.json"
+    if mpath.exists():
+        try:
+            metadata = json.loads(mpath.read_text())
+        except (OSError, json.JSONDecodeError):
+            log.warning("ignoring invalid metadata for %s", session_id)
     segments = [
         {"speaker": s["speaker"], "start_ms": s["start_ms"],
          "end_ms": s["end_ms"], "text": s["text"]}
         for s in t.get("segments", [])
     ]
-    duration_s = max((s["end_ms"] for s in segments), default=0) / 1000
+    transcript_duration = max((s["end_ms"] for s in segments), default=0) / 1000
+    try:
+        capture_duration = float(metadata.get("duration_seconds", 0))
+        if not math.isfinite(capture_duration) or capture_duration < 0:
+            capture_duration = 0
+    except (TypeError, ValueError):
+        capture_duration = 0
     return {
         "id": session_id,
-        "started_at": parse_started_at(session_id),
-        "duration_s": duration_s,
+        "started_at": parse_started_at(session_id, metadata.get("started")),
+        "duration_s": max(transcript_duration, capture_duration),
         "engine": f"{t.get('engine', '?')} ({t.get('model', '?')})",
         "segments": segments,
         "has_mic": (sdir / "mic.m4a").exists(),

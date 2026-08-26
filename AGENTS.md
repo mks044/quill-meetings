@@ -157,7 +157,10 @@ Tell the operator, in their words:
   server only receives the finished transcript and audio files.
 - A provisional `meta.json` is written when capture starts and atomically
   finalized on stop. A hard power loss therefore remains discoverable by the
-  next-launch recovery scan; CAF does not need a finalization pass.
+  next-launch recovery scan; CAF does not need a finalization pass. Dashboard
+  ingest treats the manifest's UTC `started` value and capture duration as
+  authoritative, falling back to the folder name/transcript only for legacy
+  sessions without valid metadata.
 - `afconvert` and `whisper-cli` use file-backed diagnostics rather than bounded
   pipes. Whisper has a 30-minute watchdog (override with
   `QUILL_WHISPER_TIMEOUT_SECONDS`); a timeout is killed, moved behind later

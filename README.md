@@ -70,6 +70,8 @@ Linux server, and a ChatGPT subscription for the Codex CLI.
 
 - Quill writes a provisional session manifest as soon as recording starts, so
   a hard power loss still leaves the CAF tracks discoverable on next launch.
+  Dashboard ingest uses the finalized manifest's UTC start and capture duration
+  instead of a timezone-naive folder name or the last spoken segment.
 - Transcription subprocesses never write into bounded pipes and have a
   30-minute watchdog (`QUILL_WHISPER_TIMEOUT_SECONDS` overrides it). A timed-out
   session is killed, moved behind later work, and retried once.

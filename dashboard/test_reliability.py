@@ -73,6 +73,31 @@ class RetryPersistenceTests(unittest.TestCase):
                     (sid, retry_at))
         self.assertEqual(ingest.due_ai_sessions(), ["due"])
 
+    def test_session_manifest_supplies_exact_start_and_capture_duration(self):
+        session_dir = config.SESSIONS_DIR / "2026.08.22-1413"
+        session_dir.mkdir(parents=True)
+        (session_dir / "transcript.json").write_text(
+            '{"engine":"whisper","model":"test","segments":['
+            '{"speaker":"me","start_ms":0,"end_ms":1200,"text":"hello"}]}'
+        )
+        (session_dir / "meta.json").write_text(
+            '{"started":"2026-08-22T07:13:33Z","duration_seconds":6089}'
+        )
+        data = ingest.read_session_dir(session_dir.name)
+        self.assertEqual(data["started_at"], "2026-08-22T07:13:33+00:00")
+        self.assertEqual(data["duration_s"], 6089)
+
+    def test_folder_time_and_transcript_duration_remain_the_fallback(self):
+        session_dir = config.SESSIONS_DIR / "2026.08.26-1000"
+        session_dir.mkdir(parents=True)
+        (session_dir / "transcript.json").write_text(
+            '{"segments":['
+            '{"speaker":"me","start_ms":0,"end_ms":2500,"text":"hello"}]}'
+        )
+        data = ingest.read_session_dir(session_dir.name)
+        self.assertEqual(data["started_at"], "2026-08-26T10:00:00")
+        self.assertEqual(data["duration_s"], 2.5)
+
 
 if __name__ == "__main__":
     unittest.main()
