@@ -614,7 +614,7 @@ async function meetingView(id, gen) {
   $("#btn-regen").addEventListener("click", async () => {
     await post(`/api/sessions/${encodeURIComponent(s.id)}/regenerate`);
     $("#btn-regen").textContent = "AI working…";
-    pollAI(s.id);
+    pollAI(s.id, "pending");
   });
   if (s.ai_status === "pending" || s.ai_status === "running"
       || (s.ai_status === "failed" && s.ai_retry_at)) {
