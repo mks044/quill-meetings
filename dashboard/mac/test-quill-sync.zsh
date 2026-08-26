@@ -54,6 +54,7 @@ export QUILL_RSYNC_BIN="$fake_bin/rsync"
 export QUILL_SSH_BIN="$fake_bin/ssh"
 export QUILL_SHASUM_BIN="/usr/bin/shasum"
 export QUILL_NO_NOTIFY=1
+export QUILL_SYNC_RETRY_DELAY=0
 export QUILL_TEST_EVENTS="$events"
 
 set +e
@@ -65,6 +66,8 @@ set -e
 cat > "$test_root/expected-first" <<'EOF'
 rsync 2026.08.03-1000
 ingest 2026.08.03-1000
+rsync 2026.08.02-1000
+rsync 2026.08.02-1000
 rsync 2026.08.02-1000
 rsync 2026.08.01-1000
 ingest 2026.08.01-1000
@@ -81,6 +84,11 @@ zsh "$script_dir/quill-sync"
 second_status=$?
 set -e
 [[ "$second_status" -eq 1 ]]
-[[ "$(<"$events")" == "rsync 2026.08.02-1000" ]]
+cat > "$test_root/expected-second" <<'EOF'
+rsync 2026.08.02-1000
+rsync 2026.08.02-1000
+rsync 2026.08.02-1000
+EOF
+diff -u "$test_root/expected-second" "$events"
 
 echo "quill-sync regression OK"

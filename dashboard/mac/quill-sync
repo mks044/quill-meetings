@@ -33,6 +33,7 @@ SSH_BIN="${QUILL_SSH_BIN:-$(command -v ssh 2>/dev/null)}"
 SHASUM_BIN="${QUILL_SHASUM_BIN:-$(command -v shasum 2>/dev/null)}"
 FFMPEG_BIN="${QUILL_FFMPEG_BIN:-$(command -v ffmpeg 2>/dev/null)}"
 AFCONVERT_BIN="${QUILL_AFCONVERT_BIN:-/usr/bin/afconvert}"
+RETRY_DELAY="${QUILL_SYNC_RETRY_DELAY:-3}"
 mkdir -p "$(dirname "$LOG")"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -114,10 +115,20 @@ for dir in "$RECORDINGS"/*(N/On); do
       fi
     fi
 
-    if ! "$RSYNC_BIN" -az --timeout=120 --partial-dir=.rsync-partial \
-      --include="transcript.json" --include="meta.json" --include="*.m4a" \
-      --include="transcribe.log" --exclude="*" \
-      "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
+    upload_ok=0
+    for attempt in 1 2 3; do
+      if "$RSYNC_BIN" -a --timeout=120 --partial-dir=.rsync-partial \
+        -e "$SSH_BIN -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8" \
+        --include="transcript.json" --include="meta.json" --include="*.m4a" \
+        --include="transcribe.log" --exclude="*" \
+        "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
+        upload_ok=1
+        break
+      fi
+      log "rsync $id attempt $attempt/3 failed"
+      (( attempt < 3 && RETRY_DELAY > 0 )) && sleep $((RETRY_DELAY * attempt))
+    done
+    if (( ! upload_ok )); then
       log "FAIL: rsync $id (will retry without blocking other sessions)"
       failed=$((failed+1))
       continue
