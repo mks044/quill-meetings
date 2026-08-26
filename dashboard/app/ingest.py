@@ -62,9 +62,14 @@ def due_ai_sessions() -> list[str]:
 async def retry_loop(poll_seconds: int = 60) -> None:
     """Persisted retry worker; safe across dashboard restarts."""
     while True:
-        for session_id in due_ai_sessions():
-            if schedule_ai(session_id):
-                log.info("retry deadline reached for %s", session_id)
+        try:
+            for session_id in due_ai_sessions():
+                if schedule_ai(session_id):
+                    log.info("retry deadline reached for %s", session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # keep one DB/runtime error from killing the worker
+            log.exception("notetaker retry scan failed")
         await asyncio.sleep(poll_seconds)
 
 
