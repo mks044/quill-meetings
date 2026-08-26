@@ -96,6 +96,11 @@ write_marker() {  # $1 marker path  $2 transcript hash
   mv -f "$marker_tmp" "$1"
 }
 
+dashboard_ingest() {  # $1 session id
+  "$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
+    "curl -fsS --max-time 30 -X POST $DASH_URL/api/ingest/$1 -o /dev/null"
+}
+
 synced=0
 ingested=0
 skipped=0
@@ -103,6 +108,11 @@ failed=0
 for dir in "$RECORDINGS"/*(N/On); do
   id="${dir:t}"
   [[ -f "$dir/transcript.json" ]] || continue
+  if [[ ! "$id" =~ '^[A-Za-z0-9._-]+$' ]]; then
+    log "FAIL: unsafe session id skipped: $id"
+    failed=$((failed+1))
+    continue
+  fi
   marker="$dir/.quill-synced.sha256"
   ingest_marker="$dir/.quill-ingested.sha256"
   local_hash=$("$SHASUM_BIN" -a 256 "$dir/transcript.json" | awk '{print $1}')
@@ -140,8 +150,7 @@ for dir in "$RECORDINGS"/*(N/On); do
       fi
     fi
 
-    if ! "$SSH_BIN" -o ConnectTimeout=10 "$REMOTE" \
-        "curl -fsS --max-time 30 -X POST $DASH_URL/api/ingest/$id -o /dev/null" >> "$LOG" 2>&1; then
+    if ! dashboard_ingest "$id" >> "$LOG" 2>&1; then
       log "ingest ping FAILED for $id"
       notify "quill sync" "$id transcript uploaded but ingest failed — will retry"
       failed=$((failed+1))
@@ -190,6 +199,15 @@ for dir in "$RECORDINGS"/*(N/On); do
     done
     if (( ! audio_ok )); then
       log "FAIL: audio rsync $id (notes are live; audio will resume next run)"
+      failed=$((failed+1))
+      continue
+    fi
+
+    # Transcript-first ingest sees no audio yet. Refresh after media lands so
+    # the dashboard exposes the available playback tracks without waiting for
+    # another recording or a service restart.
+    if ! dashboard_ingest "$id" >> "$LOG" 2>&1; then
+      log "post-audio ingest FAILED for $id (audio is present; flags will retry)"
       failed=$((failed+1))
       continue
     fi

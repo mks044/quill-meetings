@@ -71,6 +71,7 @@ cat > "$test_root/expected-first" <<'EOF'
 metadata 2026.08.03-1000
 ingest 2026.08.03-1000
 audio 2026.08.03-1000
+ingest 2026.08.03-1000
 metadata 2026.08.02-1000
 ingest 2026.08.02-1000
 audio 2026.08.02-1000
@@ -79,6 +80,7 @@ audio 2026.08.02-1000
 metadata 2026.08.01-1000
 ingest 2026.08.01-1000
 audio 2026.08.01-1000
+ingest 2026.08.01-1000
 EOF
 diff -u "$test_root/expected-first" "$events"
 
