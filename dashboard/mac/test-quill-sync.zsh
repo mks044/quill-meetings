@@ -19,6 +19,15 @@ for id in 2026.08.01-1000 2026.08.02-1000 2026.08.03-1000; do
   : > "$recordings/$id/system.m4a"
 done
 
+# A finalized capture without a transcript is announced but never uploads raw
+# audio. This is what makes a lid-closed meeting visible during local Whisper.
+mkdir -p "$recordings/2026.08.04-1000"
+printf '{"state":"complete","duration_seconds":60}\n' \
+  > "$recordings/2026.08.04-1000/meta.json"
+printf '{"state":"transcribing"}\n' \
+  > "$recordings/2026.08.04-1000/transcription.json"
+printf 'transcribing\n' > "$recordings/2026.08.04-1000/transcribe.log"
+
 cat > "$fake_bin/rsync" <<'STUB'
 #!/bin/zsh
 source_dir="${${@[-2]}%/}"
@@ -26,6 +35,7 @@ id="${source_dir:t}"
 command_line="$*"
 phase=metadata
 [[ "$command_line" == *'--include=*.m4a'* ]] && phase=audio
+[[ "$command_line" != *'--include=transcript.json'* && "$phase" != audio ]] && phase=announcement
 print -r -- "$phase $id" >> "$QUILL_TEST_EVENTS"
 [[ "$phase" == audio && "$id" == 2026.08.02-1000 ]] && exit 23
 exit 0
@@ -57,6 +67,7 @@ export QUILL_SYNC_PENDING="$test_root/sync.pending"
 export QUILL_RSYNC_BIN="$fake_bin/rsync"
 export QUILL_SSH_BIN="$fake_bin/ssh"
 export QUILL_SHASUM_BIN="/usr/bin/shasum"
+export QUILL_PLUTIL_BIN="/usr/bin/plutil"
 export QUILL_NO_NOTIFY=1
 export QUILL_SYNC_RETRY_DELAY=0
 export QUILL_TEST_EVENTS="$events"
@@ -68,6 +79,8 @@ set -e
 [[ "$first_status" -eq 1 ]]
 
 cat > "$test_root/expected-first" <<'EOF'
+announcement 2026.08.04-1000
+ingest 2026.08.04-1000
 metadata 2026.08.03-1000
 ingest 2026.08.03-1000
 audio 2026.08.03-1000
@@ -85,6 +98,7 @@ EOF
 diff -u "$test_root/expected-first" "$events"
 
 [[ -f "$recordings/2026.08.03-1000/.quill-synced.sha256" ]]
+[[ -f "$recordings/2026.08.04-1000/.quill-announced.sha256" ]]
 [[ ! -f "$recordings/2026.08.02-1000/.quill-synced.sha256" ]]
 [[ -f "$recordings/2026.08.01-1000/.quill-synced.sha256" ]]
 [[ -f "$recordings/2026.08.02-1000/.quill-ingested.sha256" ]]

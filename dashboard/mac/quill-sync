@@ -1,9 +1,11 @@
 #!/bin/zsh
 # quill-sync — push finished quill sessions to the quill-dash server.
 # Fired by quill's on_stop hook (session dir as $1) and safe to run bare:
-# every invocation checks every local transcript newest-first. A transcript
-# hash marker skips completed work; remote hash probing bootstraps markers on
-# upgrades. One failed session never prevents later sessions from uploading.
+# every invocation checks every local session newest-first. Completed capture
+# metadata is announced before transcription finishes; transcript and audio
+# phases follow independently. Hash markers skip completed work and remote hash
+# probing bootstraps markers on upgrades. One failed session never prevents
+# later sessions from uploading.
 #
 # Concurrency: an atomic lock dir serializes overlapping invocations (hook
 # firing while a manual run is live). Transcodes go to a temp name + atomic
@@ -35,6 +37,7 @@ SSH_BIN="${QUILL_SSH_BIN:-$(command -v ssh 2>/dev/null)}"
 SHASUM_BIN="${QUILL_SHASUM_BIN:-$(command -v shasum 2>/dev/null)}"
 FFMPEG_BIN="${QUILL_FFMPEG_BIN:-$(command -v ffmpeg 2>/dev/null)}"
 AFCONVERT_BIN="${QUILL_AFCONVERT_BIN:-/usr/bin/afconvert}"
+PLUTIL_BIN="${QUILL_PLUTIL_BIN:-/usr/bin/plutil}"
 RETRY_DELAY="${QUILL_SYNC_RETRY_DELAY:-3}"
 mkdir -p "$(dirname "$LOG")"
 mkdir -p "$(dirname "$PENDING")"
@@ -126,16 +129,65 @@ dashboard_ingest() {  # $1 session id
 
 synced=0
 ingested=0
+announced=0
 skipped=0
 failed=0
 for dir in "$RECORDINGS"/*(N/On); do
   id="${dir:t}"
-  [[ -f "$dir/transcript.json" ]] || continue
   if [[ ! "$id" =~ '^[A-Za-z0-9._-]+$' ]]; then
     log "FAIL: unsafe session id skipped: $id"
     failed=$((failed+1))
     continue
   fi
+
+  # Phase 0: a finalized recording should appear in the dashboard while its
+  # local Whisper job is still running. Never announce a live/provisional
+  # recording, and never upload raw CAF media during this phase.
+  if [[ ! -f "$dir/transcript.json" ]]; then
+    [[ -f "$dir/meta.json" ]] || continue
+    meta_state=$("$PLUTIL_BIN" -extract state raw -o - "$dir/meta.json" 2>/dev/null || true)
+    [[ "$meta_state" == "complete" ]] || continue
+
+    announce_marker="$dir/.quill-announced.sha256"
+    announcement_hash=$(
+      for state_file in "$dir/meta.json" "$dir/transcription.json" "$dir/transcribe.log"; do
+        [[ -f "$state_file" ]] && "$SHASUM_BIN" -a 256 "$state_file"
+      done | "$SHASUM_BIN" -a 256 | awk '{print $1}'
+    )
+    if [[ -f "$announce_marker" && "$(<"$announce_marker")" == "$announcement_hash" ]]; then
+      skipped=$((skipped+1))
+      continue
+    fi
+
+    announcement_ok=0
+    for attempt in 1 2 3; do
+      if "$RSYNC_BIN" -a --timeout=120 --partial-dir=.rsync-partial \
+        -e "$SSH_BIN -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8" \
+        --include="meta.json" --include="transcription.json" \
+        --include="transcribe.log" --exclude="*" \
+        "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
+        announcement_ok=1
+        break
+      fi
+      log "announcement rsync $id attempt $attempt/3 failed"
+      (( attempt < 3 && RETRY_DELAY > 0 )) && sleep $((RETRY_DELAY * attempt))
+    done
+    if (( ! announcement_ok )); then
+      log "FAIL: announcement rsync $id (will retry without blocking other sessions)"
+      failed=$((failed+1))
+      continue
+    fi
+    if ! dashboard_ingest "$id" >> "$LOG" 2>&1; then
+      log "announcement ingest FAILED for $id"
+      failed=$((failed+1))
+      continue
+    fi
+    write_marker "$announce_marker" "$announcement_hash"
+    announced=$((announced+1))
+    log "announced $id"
+    continue
+  fi
+
   marker="$dir/.quill-synced.sha256"
   ingest_marker="$dir/.quill-ingested.sha256"
   local_hash=$("$SHASUM_BIN" -a 256 "$dir/transcript.json" | awk '{print $1}')
@@ -158,7 +210,7 @@ for dir in "$RECORDINGS"/*(N/On); do
         if "$RSYNC_BIN" -a --timeout=120 --partial-dir=.rsync-partial \
           -e "$SSH_BIN -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8" \
           --include="transcript.json" --include="meta.json" \
-          --include="transcribe.log" --exclude="*" \
+          --include="transcription.json" --include="transcribe.log" --exclude="*" \
           "$dir/" "$REMOTE:$REMOTE_DIR/$id/" >> "$LOG" 2>&1; then
           metadata_ok=1
           break
@@ -243,7 +295,7 @@ for dir in "$RECORDINGS"/*(N/On); do
   log "synced $id"
 done
 
-log "done — ingested=$ingested synced=$synced skipped=$skipped failed=$failed"
+log "done — announced=$announced ingested=$ingested synced=$synced skipped=$skipped failed=$failed"
 
 # Release before checking the flag. A new invocation now either acquires the
 # lock and performs the scan itself, or had already collided and left PENDING.

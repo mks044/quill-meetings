@@ -95,11 +95,14 @@ main { max-width: 1200px; margin: 0 auto; padding: 28px 28px 120px; }
 .mc-dur { font-family: var(--mono); }
 .mc-actions-open { color: var(--me); }
 .ai-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
-.ai-badge.pending, .ai-badge.running { background: #e0b45822; color: var(--me); }
-.ai-badge.failed { background: #e5484d22; color: var(--needle); }
+.ai-badge.pending, .ai-badge.running, .ai-badge.transcribing { background: #e0b45822; color: var(--me); }
+.ai-badge.failed, .ai-badge.transcription_failed { background: #e5484d22; color: var(--needle); }
 
 .empty-state { text-align: center; padding: 90px 0; color: var(--paper-dim); }
 .empty-state .big { font-family: var(--serif); font-size: 24px; margin-bottom: 10px; color: var(--paper); }
+.local-pipeline { max-width: 760px; padding: 28px; }
+.local-pipeline h2 { margin-top: 0; font-family: var(--serif); font-weight: 500; }
+.local-pipeline p { color: var(--paper-dim); line-height: 1.65; margin-bottom: 0; }
 
 /* ---------- meeting view ---------- */
 .meet-head { margin-bottom: 24px; }

@@ -98,6 +98,67 @@ class RetryPersistenceTests(unittest.TestCase):
         self.assertEqual(data["started_at"], "2026-08-26T10:00:00")
         self.assertEqual(data["duration_s"], 2.5)
 
+    def test_finalized_capture_is_visible_then_promoted_when_transcript_arrives(self):
+        session_dir = config.SESSIONS_DIR / "2026.08.29-1415"
+        session_dir.mkdir(parents=True)
+        (session_dir / "meta.json").write_text(
+            '{"state":"complete","started":"2026-08-29T07:15:35Z",'
+            '"duration_seconds":7244}'
+        )
+        (session_dir / "transcription.json").write_text(
+            '{"state":"transcribing","updated":"2026-08-29T09:16:20Z"}'
+        )
+
+        result = ingest.ingest_session(session_dir.name)
+        self.assertEqual(result, {
+            "id": session_dir.name, "segments": 0, "ai_status": "transcribing",
+        })
+        with db.closing_conn() as conn:
+            row = conn.execute(
+                "SELECT started_at, duration_s, ai_status, segments_hash FROM sessions"
+                " WHERE id=?", (session_dir.name,)
+            ).fetchone()
+        self.assertEqual(row["started_at"], "2026-08-29T07:15:35+00:00")
+        self.assertEqual(row["duration_s"], 7244)
+        self.assertEqual(row["ai_status"], "transcribing")
+        self.assertIsNone(row["segments_hash"])
+
+        (session_dir / "transcript.json").write_text(
+            '{"engine":"whisper","model":"test","segments":['
+            '{"speaker":"me","start_ms":0,"end_ms":1200,"text":"hello"}]}'
+        )
+        result = ingest.ingest_session(session_dir.name)
+        self.assertEqual(result["segments"], 1)
+        self.assertEqual(result["ai_status"], "pending")
+
+    def test_local_failure_is_visible_but_cannot_demote_ingested_transcript(self):
+        sid = "2026.08.29-1500"
+        with db.closing_conn() as conn:
+            db.upsert_local_session(
+                conn, sid, "2026-08-29T08:00:00+00:00", 60,
+                state="failed", error="decoder stopped")
+            failed = conn.execute(
+                "SELECT ai_status, ai_error FROM sessions WHERE id=?", (sid,)
+            ).fetchone()
+            self.assertEqual(failed["ai_status"], "transcription_failed")
+            self.assertEqual(failed["ai_error"], "decoder stopped")
+
+            segments = [{
+                "speaker": "me", "start_ms": 0, "end_ms": 1000, "text": "ready",
+            }]
+            db.upsert_session(
+                conn, sid, "2026-08-29T08:00:00+00:00", 60,
+                "test", segments, False, False)
+            db.upsert_local_session(
+                conn, sid, "2026-08-29T08:00:00+00:00", 60,
+                state="failed", error="stale announcement")
+            promoted = conn.execute(
+                "SELECT ai_status, ai_error, segments_hash FROM sessions WHERE id=?", (sid,)
+            ).fetchone()
+        self.assertEqual(promoted["ai_status"], "pending")
+        self.assertIsNone(promoted["ai_error"])
+        self.assertIsNotNone(promoted["segments_hash"])
+
 
 if __name__ == "__main__":
     unittest.main()

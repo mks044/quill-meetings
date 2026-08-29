@@ -150,11 +150,22 @@ def health():
                  sum(CASE WHEN ai_status='running' THEN 1 ELSE 0 END) AS running,
                  sum(CASE WHEN ai_status='failed' THEN 1 ELSE 0 END) AS failed,
                  sum(CASE WHEN ai_status='failed' AND ai_retry_at IS NOT NULL
-                          THEN 1 ELSE 0 END) AS retrying
+                          THEN 1 ELSE 0 END) AS retrying,
+                 sum(CASE WHEN ai_status='transcribing' THEN 1 ELSE 0 END)
+                          AS local_processing,
+                 sum(CASE WHEN ai_status='transcription_failed' THEN 1 ELSE 0 END)
+                          AS local_failed
                FROM sessions"""
         ).fetchone()
     counts = {key: int(row[key] or 0) for key in ("pending", "running", "failed", "retrying")}
-    return {"ok": True, "notetaker_ok": counts["failed"] == 0, "notetaker": counts}
+    recorder = {key: int(row[key] or 0) for key in ("local_processing", "local_failed")}
+    recorder = {"processing": recorder["local_processing"], "failed": recorder["local_failed"]}
+    return {
+        "ok": recorder["failed"] == 0,
+        "notetaker_ok": counts["failed"] == 0,
+        "notetaker": counts,
+        "recorder": recorder,
+    }
 
 
 @app.on_event("startup")
@@ -365,8 +376,13 @@ async def translate(session_id: str, lang: str = "ru"):
 @app.post("/api/sessions/{session_id}/regenerate")
 async def regenerate(session_id: str):
     with db.closing_conn() as conn:
-        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+        row = conn.execute(
+            "SELECT segments_hash FROM sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        if not row:
             raise HTTPException(404, "unknown session")
+        if row["segments_hash"] is None:
+            raise HTTPException(409, "local transcription is not ready")
         conn.execute(
             """UPDATE sessions SET ai_status='pending', ai_error=NULL,
                ai_attempts=0, ai_retry_at=NULL WHERE id=?""", (session_id,))

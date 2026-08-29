@@ -37,6 +37,9 @@ EOF
 cp dashboard/mac/quill-sync ~/.local/bin/quill-sync
 chmod +x ~/.local/bin/quill-sync
 
+echo "==> installing periodic catch-up sync"
+python3 install/sync_agent.py --program "$HOME/.local/bin/quill-sync"
+
 echo "==> hooking it to the recorder"
 python3 - <<'PY'
 import json, os, pathlib

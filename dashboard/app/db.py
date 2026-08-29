@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     outline_json TEXT,                -- AI [{ms,label}]
     keywords_json TEXT,               -- AI [str]
     tags_json TEXT,                   -- AI [str]
-    ai_status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
+    ai_status TEXT NOT NULL DEFAULT 'pending',  -- transcribing|transcription_failed|pending|running|done|failed
     ai_error TEXT,
     ai_attempts INTEGER NOT NULL DEFAULT 0,
     ai_retry_at TEXT,
@@ -160,6 +160,31 @@ def upsert_session(conn, session_id, started_at, duration_s, engine,
             """UPDATE sessions SET ai_status='pending', ai_error=NULL,
                ai_attempts=0, ai_retry_at=NULL, segments_hash=? WHERE id=?""",
             (new_hash, session_id))
+
+
+def upsert_local_session(conn, session_id, started_at, duration_s,
+                         state="transcribing", error=None) -> None:
+    """Publish a finalized capture before its local transcript exists.
+
+    A stale metadata-only announcement must never demote a row that already has
+    transcript segments, so conflict updates are conditional on segments_hash
+    still being null. Normal transcript ingest later promotes the row to
+    ``pending`` through ``upsert_session``.
+    """
+    status = "transcription_failed" if state == "failed" else "transcribing"
+    detail = str(error)[:500] if status == "transcription_failed" and error else None
+    conn.execute(
+        """INSERT INTO sessions
+             (id, started_at, duration_s, engine, ai_status, ai_error)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+             started_at=excluded.started_at,
+             duration_s=excluded.duration_s,
+             engine=excluded.engine,
+             ai_status=excluded.ai_status,
+             ai_error=excluded.ai_error
+           WHERE sessions.segments_hash IS NULL""",
+        (session_id, started_at, duration_s, "whisper (local processing)", status, detail))
 
 
 def segments_hash(segments) -> str:

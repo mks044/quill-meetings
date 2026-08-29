@@ -44,6 +44,34 @@ final class SessionManifestTests: XCTestCase {
         XCTAssertEqual(manifest.startOffsetMs.system, 0)
     }
 
+    func testTranscriptionManifestWritesAtomicPipelineState() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let updated = Date(timeIntervalSince1970: 1_700_000_100)
+
+        try TranscriptionManifest.make(.transcribing, at: updated).write(to: directory)
+        let url = directory.appendingPathComponent("transcription.json")
+        var decoded = try JSONDecoder().decode(
+            TranscriptionManifest.self,
+            from: Data(contentsOf: url)
+        )
+        XCTAssertEqual(decoded.state, .transcribing)
+        XCTAssertNil(decoded.error)
+
+        try TranscriptionManifest.make(
+            .failed,
+            at: updated,
+            error: String(repeating: "x", count: 600) + "\nsecret-tail"
+        ).write(to: directory)
+        decoded = try JSONDecoder().decode(
+            TranscriptionManifest.self,
+            from: Data(contentsOf: url)
+        )
+        XCTAssertEqual(decoded.state, .failed)
+        XCTAssertEqual(decoded.error?.count, 500)
+        XCTAssertFalse(decoded.error?.contains("\n") ?? true)
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("quill-session-test-\(UUID().uuidString)")

@@ -83,3 +83,43 @@ package struct SessionManifest: Codable, Equatable, Sendable {
         ISO8601DateFormatter().string(from: date)
     }
 }
+
+/// Durable state for the post-capture transcription pipeline. The dashboard
+/// can ingest this small manifest before transcript.json exists, and a restart
+/// can report the last known state without relying on an in-memory process.
+package struct TranscriptionManifest: Codable, Equatable, Sendable {
+    package enum State: String, Codable, Sendable {
+        case queued
+        case transcribing
+        case ready
+        case failed
+    }
+
+    package let state: State
+    package let updated: String
+    package let error: String?
+
+    package static func make(
+        _ state: State,
+        at date: Date = Date(),
+        error: String? = nil
+    ) -> TranscriptionManifest {
+        let boundedError = error.map {
+            String($0.replacingOccurrences(of: "\n", with: " ").prefix(500))
+        }
+        return TranscriptionManifest(
+            state: state,
+            updated: ISO8601DateFormatter().string(from: date),
+            error: boundedError
+        )
+    }
+
+    package func write(to directory: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(self).write(
+            to: directory.appendingPathComponent("transcription.json"),
+            options: .atomic
+        )
+    }
+}

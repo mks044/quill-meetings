@@ -92,37 +92,60 @@ def parse_started_at(session_id: str, metadata_value: str | None = None) -> str:
         return dt.datetime.now().isoformat()
 
 
+def _capture_duration(metadata: dict) -> float:
+    try:
+        value = float(metadata.get("duration_seconds", 0))
+        return value if math.isfinite(value) and value >= 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        log.warning("ignoring invalid JSON metadata at %s", path)
+        return {}
+
+
 def read_session_dir(session_id: str) -> dict | None:
     sdir = config.SESSIONS_DIR / session_id
+    metadata = _read_json(sdir / "meta.json")
     tpath = sdir / "transcript.json"
     if not tpath.exists():
-        return None
+        # Never expose an active recording. A complete recorder manifest is
+        # authoritative enough to create a dashboard placeholder while local
+        # Whisper is still running.
+        if metadata.get("state") != "complete":
+            return None
+        pipeline = _read_json(sdir / "transcription.json")
+        local_state = pipeline.get("state", "transcribing")
+        return {
+            "id": session_id,
+            "started_at": parse_started_at(session_id, metadata.get("started")),
+            "duration_s": _capture_duration(metadata),
+            "transcript_ready": False,
+            "local_state": local_state,
+            "local_error": pipeline.get("error"),
+        }
+
     t = json.loads(tpath.read_text())
-    metadata = {}
-    mpath = sdir / "meta.json"
-    if mpath.exists():
-        try:
-            metadata = json.loads(mpath.read_text())
-        except (OSError, json.JSONDecodeError):
-            log.warning("ignoring invalid metadata for %s", session_id)
     segments = [
         {"speaker": s["speaker"], "start_ms": s["start_ms"],
          "end_ms": s["end_ms"], "text": s["text"]}
         for s in t.get("segments", [])
     ]
     transcript_duration = max((s["end_ms"] for s in segments), default=0) / 1000
-    try:
-        capture_duration = float(metadata.get("duration_seconds", 0))
-        if not math.isfinite(capture_duration) or capture_duration < 0:
-            capture_duration = 0
-    except (TypeError, ValueError):
-        capture_duration = 0
     return {
         "id": session_id,
         "started_at": parse_started_at(session_id, metadata.get("started")),
-        "duration_s": max(transcript_duration, capture_duration),
+        "duration_s": max(transcript_duration, _capture_duration(metadata)),
         "engine": f"{t.get('engine', '?')} ({t.get('model', '?')})",
         "segments": segments,
+        "transcript_ready": True,
         "has_mic": (sdir / "mic.m4a").exists(),
         "has_system": (sdir / "system.m4a").exists(),
         "has_mixed": (sdir / "mixed.m4a").exists(),
@@ -139,16 +162,25 @@ def ingest_session(session_id: str) -> dict:
             return {"id": session_id, "segments": 0, "ai_status": "tombstoned"}
     data = read_session_dir(session_id)
     if data is None:
-        raise FileNotFoundError(f"no transcript.json for {session_id}")
+        raise FileNotFoundError(f"no finalized session data for {session_id}")
     with db.closing_conn() as conn:
-        db.upsert_session(
-            conn, data["id"], data["started_at"], data["duration_s"],
-            data["engine"], data["segments"], data["has_mic"], data["has_system"],
-            data["has_mixed"])
+        if data["transcript_ready"]:
+            db.upsert_session(
+                conn, data["id"], data["started_at"], data["duration_s"],
+                data["engine"], data["segments"], data["has_mic"], data["has_system"],
+                data["has_mixed"])
+        else:
+            db.upsert_local_session(
+                conn, data["id"], data["started_at"], data["duration_s"],
+                data["local_state"], data["local_error"])
         status = conn.execute(
             "SELECT ai_status FROM sessions WHERE id=?", (session_id,)
         ).fetchone()["ai_status"]
-    return {"id": session_id, "segments": len(data["segments"]), "ai_status": status}
+    return {
+        "id": session_id,
+        "segments": len(data.get("segments", [])),
+        "ai_status": status,
+    }
 
 
 def schedule_ai(session_id: str) -> bool:

@@ -346,6 +346,11 @@ async function libraryView(gen) {
   });
   const list = libTag ? sessions.filter((s) => (s.tags || []).includes(libTag)) : sessions;
   $("#cards").innerHTML = list.map(cardHTML).join("");
+  if (sessions.some((s) => s.ai_status === "transcribing")) {
+    setTimeout(() => {
+      if ((location.hash || "#/") === "#/") route();
+    }, 5000);
+  }
 }
 
 function cardHTML(s) {
@@ -379,6 +384,27 @@ async function meetingView(id, gen) {
   if (stale(gen)) return;
   const lang = s.lang; // server truth: "ru" only when translation is actually applied
   const d = dateParts(s.started_at);
+  if (s.ai_status === "transcribing" || s.ai_status === "transcription_failed") {
+    const failed = s.ai_status === "transcription_failed";
+    view.innerHTML = `
+      <div class="meet-head">
+        <a class="meet-back" href="#/">← Meetings</a>
+        <h1>${esc(s.title || s.id)}</h1>
+        <div class="meet-meta">
+          <span>${d.day} ${d.year}, ${d.time}</span><span class="sep">·</span>
+          <span>${fmtDur(s.duration_s)}</span><span class="sep">·</span>
+          <span class="ai-badge ${s.ai_status}">${esc(aiLabel(s))}</span>
+        </div>
+      </div>
+      <div class="panel local-pipeline">
+        <h2>${failed ? "Local transcription needs attention" : "Transcribing on your Mac…"}</h2>
+        <p>${failed
+          ? esc(s.ai_error || "The local transcription process failed. Quill will preserve the recording for recovery.")
+          : "The recording is finalized and safe. The dashboard will fill in automatically when the local transcript arrives."}</p>
+      </div>`;
+    if (!failed) pollAI(s.id, s.ai_status);
+    return;
+  }
   const tracks = [s.has_audio_mixed && "mixed", s.has_audio_system && "system", s.has_audio_mic && "mic"].filter(Boolean);
 
   // group segments into speaker turns
@@ -647,7 +673,9 @@ async function meetingView(id, gen) {
 }
 
 function aiLabel(s) {
-  return s.ai_status === "failed" && s.ai_retry_at
+  return s.ai_status === "transcribing" ? "Transcribing on Mac…"
+    : s.ai_status === "transcription_failed" ? "Local transcription failed"
+    : s.ai_status === "failed" && s.ai_retry_at
     ? `AI paused: ${s.ai_error || "temporary failure"} — automatic retry scheduled`
     : s.ai_status === "failed" ? `AI failed: ${s.ai_error || "unknown"} — hit Regenerate`
     : s.ai_status === "running" ? "AI is reading the meeting…"
@@ -655,7 +683,9 @@ function aiLabel(s) {
 }
 
 function aiBadgeText(s) {
-  return s.ai_status === "failed" && s.ai_retry_at ? "AI retrying…"
+  return s.ai_status === "transcribing" ? "Transcribing on Mac…"
+    : s.ai_status === "transcription_failed" ? "Transcription failed"
+    : s.ai_status === "failed" && s.ai_retry_at ? "AI retrying…"
     : s.ai_status === "failed" ? "AI failed"
     : "AI working…";
 }

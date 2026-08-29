@@ -1,71 +1,79 @@
-# Quill transcription recovery plan
+# Quill sleep/wake visibility and delivery plan
 
 ## Objective
 
-Recover the finalized 2026-08-07 and 2026-08-22 recordings, make them visible
-with completed AI notes on the dashboard, and prevent one stuck decoder from
-blocking every later meeting.
+Make a lid-closed meeting visible on the dashboard as soon as capture is safely
+finalized, keep its local transcription state accurate, and guarantee eventual
+upload even if Quill exits in the narrow window between writing the transcript
+and launching the completion hook.
 
-## Root cause
+## Current incident
 
-The recorder gives `whisper-cli` pipe-backed stdout and stderr, then waits for
-the child to exit before reading either pipe. A sufficiently long transcript
-fills stdout, leaving Whisper blocked in `write(2)` and Quill blocked in
-`waitUntilExit()` forever. The serial transcription queue cannot advance and
-the upload hook never runs.
+Session `2026.08.29-1415` started at `2026-08-29T07:15:35Z` and finalized at
+`09:16:19Z` with 7,244 seconds of capture. macOS entered clamshell sleep five
+seconds later and woke five minutes afterward. Whisper resumed on wake and a
+live process sample confirmed active Metal decoding, so the recording is not
+lost or wedged. It is absent from the dashboard only because Quill currently
+waits for the complete local transcript before invoking sync.
 
 ## Design
 
-1. Add a small testable process-runner target. Route unused stdout to the null
-   device and stderr to a temporary file, eliminating bounded-pipe backpressure.
-2. Give every subprocess an explicit wall-clock timeout with TERM, a short
-   grace period, and KILL fallback. Return only a bounded stderr tail.
-3. Use the runner for both `afconvert` and `whisper-cli`. Treat timeouts as
-   session failures instead of silently producing a partial/empty transcript.
-4. Requeue a timed-out session once behind the remaining queue, so one bad job
-   cannot block later recordings and a transient sleep/wake failure self-heals.
-5. Add regression tests for output larger than pipe capacity, stderr capture,
-   non-zero exit status, and timeout termination.
-6. Make the uploader a durable newest-first outbox: transcript-hash markers,
-   remote hash bootstrapping, resumable transfers, and per-session failure
-   isolation keep old or offline work from blocking the newest meeting. Split
-   transcript ingest from audio delivery so notes become visible first and
-   partial media resumes independently.
-7. Persist notetaker attempt counts and retry deadlines. Retry credential
-   failures with capped backoff, bound transient/model retries, and expose
-   aggregate notetaker health so failures cannot remain silent or require a
-   manual re-ingest after credentials recover.
+1. Persist an atomic `transcription.json` state beside each recording. Quill
+   records queued, transcribing, ready, and failed transitions so a restart,
+   uploader, or dashboard never has to infer pipeline state from a process.
+2. Invoke the idempotent sync hook when a completed capture enters the queue,
+   on meaningful transcription-state changes, and after the transcript is
+   ready. Restart recovery republishes unfinished work.
+3. Extend `quill-sync` with a metadata-only announcement phase. It uploads only
+   `meta.json`, `transcription.json`, and the diagnostic log before a transcript
+   exists; raw CAF audio remains local. State-hash markers keep scans cheap.
+4. Let dashboard ingest create a placeholder from authoritative recorder
+   metadata, with explicit local-transcribing/local-failed states. Arrival of
+   `transcript.json` atomically promotes that row into the existing AI queue.
+5. Show the local state in the meeting library and meeting page, and poll until
+   the transcript arrives. Do not expose chat, regeneration, or sharing against
+   an empty transcript.
+6. Install a dedicated `com.digimata.quill-sync` LaunchAgent. `RunAtLoad` plus
+   five-minute `StartCalendarInterval` entries provide a durable outbox sweep;
+   launchd coalesces missed calendar events and runs once on wake. The existing
+   PID-owned uploader lock makes hook and scheduled invocations safe together.
+7. Mark the recorder's long-running decode as user-initiated work that still
+   permits system sleep, while disabling sudden/automatic termination for the
+   duration of the queue drain.
 
 ## Files
 
-- `recorder/Package.swift`
-- `recorder/Sources/QuillProcess/ProcessRunner.swift`
 - `recorder/Sources/QuillSession/SessionManifest.swift`
-- `recorder/Sources/quill/RecordingSession.swift`
-- `recorder/Sources/quill/Transcription/WhisperEngine.swift`
 - `recorder/Sources/quill/Transcription/TranscriptionCoordinator.swift`
-- `recorder/Tests/QuillProcessTests/ProcessRunnerTests.swift`
 - `recorder/Tests/QuillSessionTests/SessionManifestTests.swift`
 - `dashboard/mac/quill-sync`
 - `dashboard/mac/test-quill-sync.zsh`
 - `dashboard/app/db.py`
 - `dashboard/app/ingest.py`
 - `dashboard/app/main.py`
+- `dashboard/static/app.js`
+- `dashboard/static/style.css`
 - `dashboard/test_reliability.py`
-- `README.md`, `SETUP.md`, and `AGENTS.md`
+- `install/link.sh`, `install/sync_agent.py`, `install/test_sync_agent.py`
+- `README.md`, `SETUP.md`, `AGENTS.md`, `status.md`
 
 ## Verification and deployment
 
-1. Run debug and release Swift builds plus the full test suite.
-2. Commit and push the fix, then fast-forward the canonical life-os checkout.
-3. Stop the verified idle old recorder and its wedged child, install the new
-   app bundle, and relaunch it.
-4. Watch both pending sessions produce transcripts, sync, ingest, and finish
-   AI notes. Verify through the authenticated dashboard API and server DB.
-5. Confirm no Whisper process remains stuck and both Git worktrees are clean.
+1. Test manifest transitions, metadata-only ingest and promotion, uploader
+   announcement/idempotence, and LaunchAgent plist generation.
+2. Run debug and release Swift suites, dashboard tests, uploader regressions,
+   JavaScript syntax checks, and shell syntax checks.
+3. Deploy server support first, then install the new uploader and scheduled
+   agent on the Mac. Do not restart Quill while the live Whisper child is
+   decoding; install the new recorder only after this session finishes.
+4. Verify the current session appears, promotes to a complete transcript,
+   receives AI notes, exposes all audio tracks, and matches Mac/server hashes.
+5. Force a sync-agent run and a recorder restart, confirm both return cleanly,
+   then verify Mac/server worktrees and service health.
 
 ## Rollback
 
-The recordings are immutable inputs. If the new binary fails, restore the
-previous executable from a timestamped backup and relaunch; no session data is
-deleted or rewritten before an atomic transcript write succeeds.
+All new files are additive and session inputs remain immutable. The dashboard
+accepts legacy sessions without `transcription.json`; removing the sync agent
+returns delivery to the existing completion hook. The previous app executable
+is retained before deployment so recorder rollback never touches recordings.

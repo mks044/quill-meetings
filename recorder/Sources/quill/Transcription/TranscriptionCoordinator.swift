@@ -1,5 +1,6 @@
 import Foundation
 import QuillProcess
+import QuillSession
 
 /// Post-recording pipeline: a serial queue of session folders to transcribe.
 /// mic.caf → "me", system.caf → "them"; each track's segments are shifted by
@@ -32,6 +33,7 @@ actor TranscriptionCoordinator {
             runHook(for: sessionDir)
             return
         }
+        publishPipeline(.queued, for: sessionDir)
         queue.append(sessionDir)
         drainIfIdle()
     }
@@ -53,6 +55,7 @@ actor TranscriptionCoordinator {
             }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         for dir in pending where !queue.contains(dir) {
+            publishPipeline(.queued, for: dir)
             queue.append(dir)
         }
         if !pending.isEmpty {
@@ -73,23 +76,36 @@ actor TranscriptionCoordinator {
     }
 
     private func drain() async {
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [
+                .userInitiatedAllowingIdleSystemSleep,
+                .suddenTerminationDisabled,
+                .automaticTerminationDisabled,
+            ],
+            reason: "Transcribing recorded meetings"
+        )
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+
         var timeoutRetries: [URL: Int] = [:]
         while !queue.isEmpty {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
+            publishPipeline(.transcribing, for: dir)
             do {
                 try await transcribe(dir)
                 timeoutRetries.removeValue(forKey: dir)
+                publishPipeline(.ready, for: dir)
                 notifyUser(title: "quill — transcript ready", body: dir.lastPathComponent)
-                runHook(for: dir)
             } catch {
                 log(dir, "transcription failed: \(error)")
                 if Self.isTimeout(error), timeoutRetries[dir, default: 0] == 0 {
                     timeoutRetries[dir] = 1
                     queue.append(dir)
                     log(dir, "timeout — requeued once behind \(queue.count - 1) session(s)")
+                    publishPipeline(.queued, for: dir)
                     continue
                 }
+                publishPipeline(.failed, for: dir, error: "\(error)")
                 lastFailure = dir.lastPathComponent
                 notifyUser(
                     title: "quill — transcription failed",
@@ -170,8 +186,9 @@ actor TranscriptionCoordinator {
     }
 
     /// Fires the configured on_stop shell command with the session directory
-    /// as its sole argument, after the transcript exists (or immediately after
-    /// recording when transcription is disabled).
+    /// as its sole argument. Pipeline-state transitions publish early status;
+    /// the ready transition publishes the finished transcript. Hooks must be
+    /// idempotent because scheduled catch-up can run at the same time.
     private func runHook(for dir: URL) {
         guard let cmd = Config.onStop() else { return }
         let task = Process()
@@ -198,6 +215,21 @@ actor TranscriptionCoordinator {
 
     private func publish(_ status: Status) {
         statusHandler?(status)
+    }
+
+    /// Persist before publishing through the idempotent hook. A failed state
+    /// write must not block transcription; the log remains the local fallback.
+    private func publishPipeline(
+        _ state: TranscriptionManifest.State,
+        for dir: URL,
+        error: String? = nil
+    ) {
+        do {
+            try TranscriptionManifest.make(state, error: error).write(to: dir)
+        } catch {
+            log(dir, "failed to write transcription state: \(error)")
+        }
+        runHook(for: dir)
     }
 
     private static func isTimeout(_ error: Error) -> Bool {
