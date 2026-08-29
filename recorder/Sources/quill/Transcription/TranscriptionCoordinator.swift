@@ -17,6 +17,7 @@ actor TranscriptionCoordinator {
     }
 
     private var queue: [URL] = []
+    private var activeSession: URL?
     private var draining = false
     private var engine: TranscriptionEngine?
     private var lastFailure: String?
@@ -33,14 +34,15 @@ actor TranscriptionCoordinator {
             runHook(for: sessionDir)
             return
         }
+        guard activeSession != sessionDir, !queue.contains(sessionDir) else { return }
         publishPipeline(.queued, for: sessionDir)
         queue.append(sessionDir)
         drainIfIdle()
     }
 
     /// Scan the recordings root for sessions that finished (meta.json exists)
-    /// but were never transcribed. Folder names sort chronologically, so
-    /// oldest-first is a name sort.
+    /// but were never transcribed. Newest-first matches the dashboard/outbox:
+    /// a forgotten historical session cannot delay the call the user just had.
     func resumePending(root: URL) {
         guard Config.transcriptionEnabled() else { return }
         guard let entries = try? FileManager.default.contentsOfDirectory(
@@ -53,8 +55,8 @@ actor TranscriptionCoordinator {
                 fm.fileExists(atPath: $0.appendingPathComponent("meta.json").path)
                     && !fm.fileExists(atPath: $0.appendingPathComponent("transcript.json").path)
             }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        for dir in pending where !queue.contains(dir) {
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        for dir in pending where activeSession != dir && !queue.contains(dir) {
             publishPipeline(.queued, for: dir)
             queue.append(dir)
         }
@@ -86,23 +88,27 @@ actor TranscriptionCoordinator {
         )
         defer { ProcessInfo.processInfo.endActivity(activity) }
 
-        var timeoutRetries: [URL: Int] = [:]
+        var failureRetries: [URL: Int] = [:]
         while !queue.isEmpty {
             let dir = queue.removeFirst()
+            activeSession = dir
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
             publishPipeline(.transcribing, for: dir)
             do {
                 try await transcribe(dir)
-                timeoutRetries.removeValue(forKey: dir)
+                failureRetries.removeValue(forKey: dir)
                 publishPipeline(.ready, for: dir)
                 notifyUser(title: "quill — transcript ready", body: dir.lastPathComponent)
             } catch {
                 log(dir, "transcription failed: \(error)")
-                if Self.isTimeout(error), timeoutRetries[dir, default: 0] == 0 {
-                    timeoutRetries[dir] = 1
+                if TranscriptionAttemptPolicy.shouldRetry(
+                    completedRetries: failureRetries[dir, default: 0]
+                ) {
+                    failureRetries[dir, default: 0] += 1
                     queue.append(dir)
-                    log(dir, "timeout — requeued once behind \(queue.count - 1) session(s)")
+                    log(dir, "failure — requeued once behind \(queue.count - 1) session(s)")
                     publishPipeline(.queued, for: dir)
+                    activeSession = nil
                     continue
                 }
                 publishPipeline(.failed, for: dir, error: "\(error)")
@@ -112,6 +118,7 @@ actor TranscriptionCoordinator {
                     body: "\(dir.lastPathComponent) — see transcribe.log"
                 )
             }
+            activeSession = nil
         }
         await engine?.release()
         engine = nil
@@ -127,10 +134,12 @@ actor TranscriptionCoordinator {
         let engine = try await preparedEngine()
 
         var merged: [Transcript.Segment] = []
+        var trackFailures: [String] = []
         for track in meta.tracks {
             let audio = dir.appendingPathComponent(track.file)
             guard FileManager.default.fileExists(atPath: audio.path) else {
                 log(dir, "skipping missing track \(track.file)")
+                trackFailures.append("\(track.file): missing")
                 continue
             }
             log(dir, "transcribing \(track.file) (\(engine.name))")
@@ -147,7 +156,11 @@ actor TranscriptionCoordinator {
                 throw error
             } catch {
                 log(dir, "skipping \(track.file): \(error)")
+                trackFailures.append("\(track.file): \(error)")
                 continue
+            }
+            if segments.isEmpty {
+                trackFailures.append("\(track.file): no speech")
             }
             let offset = TimeInterval(track.offsetMs) / 1000
             merged += segments.map {
@@ -160,6 +173,10 @@ actor TranscriptionCoordinator {
             }
         }
         merged.sort { $0.start_ms < $1.start_ms }
+        try TranscriptionAttemptPolicy.requireUsableSegments(
+            merged.count,
+            failures: trackFailures
+        )
 
         let transcript = Transcript(
             engine: engine.name,
@@ -232,11 +249,6 @@ actor TranscriptionCoordinator {
         runHook(for: dir)
     }
 
-    private static func isTimeout(_ error: Error) -> Bool {
-        guard let processError = error as? ProcessRunnerError else { return false }
-        if case .timedOut = processError { return true }
-        return false
-    }
 }
 
 /// The slice of meta.json the coordinator needs: which files exist, who they

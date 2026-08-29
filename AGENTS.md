@@ -86,8 +86,8 @@ bash install/link.sh user@host
 ```
 
 Writes `~/.config/quill-dash/sync.conf`, installs `~/.local/bin/quill-sync`,
-and sets it as the recorder's `on_stop` hook so every finished recording
-uploads itself.
+sets it as the recorder's idempotent state-change hook, and installs the
+`com.digimata.quill-sync` five-minute LaunchAgent catch-up sweep.
 
 **Check (end-to-end, do this — don't assume):** ask the operator to record ~20
 seconds of speech and stop. Then:
@@ -163,10 +163,12 @@ Tell the operator, in their words:
   sessions without valid metadata.
 - `afconvert` and `whisper-cli` use file-backed diagnostics rather than bounded
   pipes. Whisper has a 30-minute watchdog (override with
-  `QUILL_WHISPER_TIMEOUT_SECONDS`); a timeout is killed, moved behind later
-  sessions, and retried once, so one bad recording cannot wedge the queue.
-- `quill-sync` is catch-up by design — every run checks completed transcripts
-  newest-first, skips matching `.quill-synced.sha256` markers, bootstraps old
+  `QUILL_WHISPER_TIMEOUT_SECONDS`); any failed session moves behind later work
+  and retries once. Empty output becomes a visible local failure rather than a
+  false transcript, so one bad recording cannot wedge or poison the queue.
+- `quill-sync` is catch-up by design — it announces finalized capture metadata
+  before a transcript exists, then checks completed transcripts newest-first,
+  skips matching `.quill-synced.sha256` markers, bootstraps old
   markers from the remote transcript hash, retries resumable transfers three
   times over keepalive SSH, and continues past per-session failures. Transcript
   ingest has its own `.quill-ingested.sha256` marker and always happens before
@@ -174,13 +176,15 @@ Tell the operator, in their words:
   compressed M4A audio is not recompressed by rsync. A colliding on-stop hook
   leaves a pending-rescan flag that the active uploader consumes before exit;
   the lock is PID-owned, so a long live transfer cannot be stolen by a timeout
-  and a dead owner is reclaimed. An offline laptop self-heals without old work
-  blocking new work. Run it by hand any time.
+  and a dead owner is reclaimed. A launchd calendar sweep runs every five
+  minutes and coalesces a missed run on wake, so an offline or interrupted
+  laptop self-heals without another recording. Run it by hand any time.
 - Ingest is idempotent; re-uploading a session does not duplicate it. Deleting a
   meeting in the UI tombstones it, so a later sync can't resurrect it.
 - Notetaker retry deadlines survive service restarts. Auth failures back off to
   hourly retries, transient failures retry five times, and unexpected output
-  failures retry twice. `/api/health` exposes only aggregate notetaker counts.
+  failures retry twice. `/api/health` exposes aggregate notetaker and local
+  transcription counts.
   `codex login status` checks cached state, not a live model request; if the
   error says a refresh token was used, run `codex login --device-auth` on that
   server. The retry worker finishes stranded notes after the credential changes.

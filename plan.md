@@ -40,6 +40,9 @@ waits for the complete local transcript before invoking sync.
 7. Mark the recorder's long-running decode as user-initiated work that still
    permits system sleep, while disabling sudden/automatic termination for the
    duration of the queue drain.
+8. Retry any failed local session once behind newer work and refuse to publish
+   an empty transcript. The durable failed state remains visible if retry also
+   fails.
 
 ## Files
 

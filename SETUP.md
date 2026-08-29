@@ -120,6 +120,8 @@ EOF
 
 cp ~/quill-meetings/dashboard/mac/quill-sync ~/.local/bin/quill-sync
 chmod +x ~/.local/bin/quill-sync
+python3 ~/quill-meetings/install/sync_agent.py \
+  --program ~/.local/bin/quill-sync
 ```
 
 Fire it automatically when a recording ends:
@@ -132,9 +134,9 @@ EOF
 ```
 
 Test the whole chain: record 20 seconds, stop, then open the dashboard. The
-meeting appears within seconds and the AI notes fill in a minute or two later.
-Run `quill-sync` by hand any time — it re-syncs everything not yet uploaded, so
-a laptop that was offline catches up on its own.
+meeting appears as locally transcribing within seconds and the AI notes fill in
+after Whisper finishes. The five-minute launchd sweep catches missed hooks and
+coalesces a missed calendar run on wake. Run `quill-sync` by hand any time.
 
 ---
 
@@ -153,8 +155,8 @@ a laptop that was offline catches up on its own.
 | Symptom | Cause / fix |
 |---|---|
 | Recordings are silent | System Audio Recording permission not granted to the app bundle |
-| Meeting never appears | Check its local `transcribe.log`, then `~/.local/state/quill-sync.log`; run `quill-sync` manually only after `transcript.json` exists. Sync continues past other failed meetings and retries them next run. |
-| Transcription timed out | Quill kills it, processes later sessions, then retries once; override the 30-minute watchdog with `QUILL_WHISPER_TIMEOUT_SECONDS` only for unusually slow hardware |
+| Meeting never appears | Check its local `meta.json`/`transcription.json`, then `~/.local/state/quill-sync.log` and `launchctl print gui/$(id -u)/com.digimata.quill-sync`. A finalized meeting should appear while Whisper is still running; the scheduled sweep retries automatically. |
+| Transcription failed/timed out | Quill processes later sessions and retries once; empty output is never published as success. Override `QUILL_WHISPER_TIMEOUT_SECONDS` only for unusually slow hardware. |
 | "AI failed" on a meeting | Check `/api/health` and `journalctl --user -u quill-dash -n 50`. `codex login status` only checks cached state; for an access/refresh-token error, run `codex login --device-auth`. The persisted retry worker resumes the meeting automatically after repair. |
 | AI failed with a model error | Your Codex CLI is old: `npm i -g @openai/codex@latest` |
 | Login loop over plain HTTP | Cookies are `Secure` — use HTTPS, or drop the password on a private network |

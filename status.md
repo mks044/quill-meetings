@@ -1,5 +1,37 @@
 # Project status
 
+## Shipped 2026-08-29 — visible sleep/wake processing and scheduled catch-up
+
+Session `2026.08.29-1415` recorded 7,244 seconds, finalized five seconds before
+clamshell sleep, and resumed active Metal transcription after wake. It completed
+2,190 transcript segments, AI notes, seven action items, and all three playback
+tracks. This incident was healthy processing rather than a repeat deadlock, but
+the dashboard had no state until the full local transcript existed.
+
+Quill now writes an atomic `transcription.json` state and invokes its idempotent
+sync hook on queued, transcribing, ready, and failed transitions. The uploader
+announces finalized metadata before the transcript or audio exists; the
+dashboard renders and polls a clear “Transcribing on Mac” placeholder, then
+promotes the same row into the AI queue when the transcript arrives.
+
+A dedicated `com.digimata.quill-sync` LaunchAgent runs at login and every five
+calendar minutes. Missed calendar events coalesce on wake, closing the crash
+window between transcript creation and the completion hook. Its existing
+PID-owned lock safely serializes scheduled and hook-triggered runs.
+
+The recovery queue is now newest-first and deduplicated. Every failed local
+session retries once behind newer work, and zero usable segments become a
+durable visible failure instead of an empty successful transcript. Processing
+placeholders cannot be shared, regenerated, or included in global Ask context.
+
+### Verification
+
+- Processing library and detail views passed a real-browser visual check.
+- Debug and release recorder suites pass (nine tests).
+- Dashboard ingest/promotion tests pass (eight tests).
+- Uploader and LaunchAgent regression suites pass.
+- The live session completed transcript, notes, actions, and all audio tracks.
+
 ## Shipped 2026-08-26 — crash-safe recovery and delivery
 
 The missing Saturday meeting (`2026.08.22-1413`) and the older blocked meeting

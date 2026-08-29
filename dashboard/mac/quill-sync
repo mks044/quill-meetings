@@ -98,7 +98,7 @@ trap 'exit 143' TERM
 
 fail() {
   log "FAIL: $1"
-  notify "quill sync failed" "$1 — will retry on next recording"
+  notify "quill sync failed" "$1 — scheduled retry remains active"
   exit 1
 }
 
@@ -227,7 +227,7 @@ for dir in "$RECORDINGS"/*(N/On); do
 
     if ! dashboard_ingest "$id" >> "$LOG" 2>&1; then
       log "ingest ping FAILED for $id"
-      notify "quill sync" "$id transcript uploaded but ingest failed — will retry"
+      notify "quill sync" "$id transcript uploaded but ingest failed — retry scheduled"
       failed=$((failed+1))
       continue
     fi
@@ -309,6 +309,6 @@ if [[ -f "$PENDING" ]]; then
 fi
 
 if (( failed > 0 )); then
-  notify "quill sync incomplete" "$failed session(s) will retry on the next run"
+  notify "quill sync incomplete" "$failed session(s) will retry on the scheduled sweep"
   exit 1
 fi

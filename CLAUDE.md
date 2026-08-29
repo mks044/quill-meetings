@@ -86,8 +86,8 @@ bash install/link.sh user@host
 ```
 
 Writes `~/.config/quill-dash/sync.conf`, installs `~/.local/bin/quill-sync`,
-and sets it as the recorder's `on_stop` hook so every finished recording
-uploads itself.
+sets it as the recorder's idempotent state-change hook, and installs a
+five-minute launchd catch-up sweep.
 
 **Check (end-to-end, do this — don't assume):** ask the operator to record ~20
 seconds of speech and stop. Then:
@@ -155,8 +155,12 @@ Tell the operator, in their words:
 
 - Audio never leaves the Mac for transcription: Whisper runs on-device. The
   server only receives the finished transcript and audio files.
-- `quill-sync` is catch-up by design — every run uploads *everything* not yet
-  synced, so an offline laptop self-heals. Run it by hand any time.
+- Failed local transcription moves behind later work and retries once; empty
+  output is reported as a local failure instead of a successful transcript.
+- `quill-sync` announces finalized meetings while local Whisper is running and
+  uploads everything not yet synced. A launchd calendar sweep runs every five
+  minutes and coalesces a missed run on wake, so an interrupted laptop
+  self-heals without another recording.
 - Ingest is idempotent; re-uploading a session does not duplicate it. Deleting a
   meeting in the UI tombstones it, so a later sync can't resurrect it.
 - The dashboard has no user accounts — one shared password (or none). Share

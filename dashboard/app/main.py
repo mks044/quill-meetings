@@ -403,8 +403,13 @@ def _public_base(request: Request) -> str:
 @app.post("/api/sessions/{session_id}/share")
 def create_share(session_id: str, request: Request, lang: str = "en"):
     with db.closing_conn() as conn:
-        if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+        row = conn.execute(
+            "SELECT segments_hash FROM sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        if not row:
             raise HTTPException(404, "unknown session")
+        if row["segments_hash"] is None:
+            raise HTTPException(409, "local transcription is not ready")
         row = conn.execute(
             "SELECT token FROM share_tokens WHERE session_id=?", (session_id,)).fetchone()
         if row:
@@ -731,7 +736,8 @@ async def global_ask(body: ChatBody):
         hit_ids = list(by_session.keys())[:6]
         if not hit_ids:
             hit_ids = [r["id"] for r in conn.execute(
-                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 4")]
+                """SELECT id FROM sessions WHERE segments_hash IS NOT NULL
+                   ORDER BY started_at DESC LIMIT 4""")]
         for sid in hit_ids:
             srow = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
             if not srow:

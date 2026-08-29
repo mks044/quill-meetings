@@ -73,19 +73,23 @@ Linux server, and a ChatGPT subscription for the Codex CLI.
   Dashboard ingest uses the finalized manifest's UTC start and capture duration
   instead of a timezone-naive folder name or the last spoken segment.
 - Transcription subprocesses never write into bounded pipes and have a
-  30-minute watchdog (`QUILL_WHISPER_TIMEOUT_SECONDS` overrides it). A timed-out
-  session is killed, moved behind later work, and retried once.
-- Transcripts are written atomically; the upload hook runs only after a complete
-  transcript exists, and startup rescans every finalized-but-untranscribed
-  session.
-- The uploader works newest-first, records the transcript hash after successful
-  ingest, and makes notes visible before starting the independent audio phase.
+  30-minute watchdog (`QUILL_WHISPER_TIMEOUT_SECONDS` overrides it). A failed
+  session is moved behind later work and retried once; empty output is a visible
+  local failure, never a falsely successful transcript.
+- Transcription state is written atomically and published as soon as capture
+  finalizes, so the dashboard shows a meeting while Whisper works. Startup
+  rescans every finalized-but-untranscribed session.
+- The uploader works newest-first, announces finalized metadata before the
+  transcript exists, records the transcript hash after successful ingest, and
+  makes notes visible before starting the independent audio phase.
   Audio retries resumably over keepalive SSH, while per-meeting markers prevent
   historical work or one network timeout from blocking newer notes. A hook
   that collides with an active upload leaves a pending-rescan flag, so the new
   transcript cannot be lost behind a long media transfer. The lock follows its
   owning process rather than a timer, so hours-long uploads stay serialized and
   a crashed owner is reclaimed immediately.
+- A five-minute launchd calendar sweep runs at login and coalesces missed runs
+  on wake, closing the crash window between transcript creation and the hook.
 - Server-side notetaker failures persist a bounded retry deadline in SQLite.
   Authentication failures retry at an increasing interval (capped at hourly),
   transient failures retry five times, and `/api/health` reports pending,

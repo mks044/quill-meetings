@@ -68,6 +68,7 @@ Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 | `mic.caf` | your side (default input device, AAC) |
 | `system.caf` | everything the Mac played — the other side of the call (AAC) |
 | `meta.json` | start/end timestamps, duration, per-track start offsets |
+| `transcription.json` | durable queued/transcribing/ready/failed pipeline state |
 | `transcript.json` | canonical transcript — engine provenance + timed, speaker-tagged segments |
 | `transcript.md` | the same transcript rendered for reading |
 | `transcribe.log` | transcription progress/errors for this session |
@@ -94,7 +95,8 @@ share one clock, and merged by timestamp. Jobs run in a serial queue — you can
 start a new recording while the last one transcribes. Unfinished jobs resume
 on next launch (the filesystem is the queue: a session with `meta.json` but no
 `transcript.json` is pending). Failures append to the session's
-`transcribe.log` and never block later jobs.
+`transcribe.log`, move behind later jobs, and retry once. Empty decoder output
+is a durable failure rather than an empty successful transcript.
 
 The engine sits behind a small protocol; a Whisper engine (WhisperKit
 large-v3-turbo) is planned as the fallback / re-transcription option.
@@ -121,9 +123,9 @@ Optional, at `~/.config/quill/config.json`:
   is configured, but it can't be zeroed). On headphones there's no echo to
   cancel, so raw capture is the better default.
 - `on_stop` — shell command spawned with the session directory as its
-  argument, **after the transcript is written** (or right after recording if
-  transcription is disabled). Wire it to whatever comes next: summarization,
-  filing, indexing.
+  argument on durable transcription-state changes (or right after recording if
+  transcription is disabled). Hooks must be idempotent. This lets downstream
+  systems show processing immediately and ingest the transcript when ready.
 
 ## CLI
 
