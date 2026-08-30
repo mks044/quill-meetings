@@ -1,5 +1,33 @@
 # Project status
 
+## Shipped 2026-08-30 — owner-controlled, portable notes
+
+Processed EN and RU notes are now editable from the meeting action menu. The
+focused editor covers title, at-a-glance brief, decisions, detailed Markdown
+notes, and open questions while preserving existing source timestamps. Edits
+are tracked per language, and optimistic revisions reject stale saves instead
+of letting a second browser window silently overwrite newer work.
+
+The owner can copy a summary-only Markdown note or a complete Markdown record
+with timestamped speaker transcript. Shared meetings remain read-only and can
+copy only the summary. Regeneration warns before replacing owner changes;
+English edits invalidate machine-derived Russian notes but preserve any RU note
+the owner explicitly edited, refreshing only translated action text.
+
+### Verification
+
+- Desktop/mobile editor, EN/RU independence, add/remove rows, dirty-close,
+  keyboard focus trap/return, shared copy, and both export sizes passed isolated
+  real-browser checks without console errors.
+- Dashboard, Mac sync-agent, and shell sync regression suites pass (12 tests in
+  total), alongside JavaScript/Python syntax and migration checks.
+- A production stale-revision PATCH returned 409 and left the live meeting byte
+  state unchanged; private EN/RU payloads expose their own revision while the
+  guest DTO exposes no internal edit/revision fields.
+- The live service is active at `a4d90e8`; all six meetings are done, queues are
+  empty, SQLite integrity is `ok`, deployed/served hashes match the tested
+  files, and the service journal contains no warnings.
+
 ## Shipped 2026-08-30 — summary-first meeting workspace
 
 The dashboard now opens each meeting on a useful summary instead of a wall of
