@@ -1,5 +1,35 @@
 # Project status
 
+## Shipped 2026-08-30 — privacy-tiered sharing
+
+New anonymous links now default to **Summary only**. Their allow-list payload
+contains the title, meeting metadata, structured notes, and read-only actions,
+but does not query or serialize transcript segments, timeline chapters, audio
+availability, or audio bytes. Direct audio requests for a valid summary link
+return 403. Guests see a clearly labelled summary-only surface with a locked
+Transcript tab and can still copy the useful summary.
+
+The owner Share dialog can explicitly grant **Full meeting** when raw transcript
+and playable audio are intended. It shows the current scope, reuses the same
+unguessable URL when language/scope changes, confirms revocation, and warns that
+anyone holding a full link receives the raw conversation. Existing links were
+migrated as Full so already-sent URLs did not silently lose access; the sole live
+link retained its token and scope.
+
+### Verification
+
+- Isolated API tests prove strict summary DTOs, 403 audio denial, fail-closed
+  corrupt scopes, full payload plus byte-range audio, immediate revocation, and
+  simultaneous first-share clicks converging on one token.
+- Real-browser checks cover new Summary-only default, existing Full state,
+  same-token scope change, owner copy feedback, full transcript/player, locked
+  summary guest view, and modal focus trap/return.
+- All 17 dashboard/share/sync tests pass with JavaScript/Python syntax and diff
+  checks; no skipped assertions or flaky runs were observed.
+- Live at `b5c6f3b`: six of six meetings done, queues empty, SQLite integrity
+  `ok`, invalid-scope production probe rejected without mutation, legacy full
+  DTO/range audio compatible, served hashes exact, and service journal clean.
+
 ## Shipped 2026-08-30 — owner-controlled, portable notes
 
 Processed EN and RU notes are now editable from the meeting action menu. The
