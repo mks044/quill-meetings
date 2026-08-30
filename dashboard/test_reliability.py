@@ -1,3 +1,4 @@
+import json
 import tempfile
 import sys
 import types
@@ -195,7 +196,110 @@ class RetryPersistenceTests(unittest.TestCase):
         with db.closing_conn() as conn:
             translated_columns = {row["name"] for row in conn.execute(
                 "PRAGMA table_info(artifacts_lang)")}
+            session_columns = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(sessions)")}
         self.assertIn("summary_json", translated_columns)
+        self.assertIn("notes_edited_at", translated_columns)
+        self.assertIn("notes_edited_at", session_columns)
+        self.assertIn("notes_revision", translated_columns)
+        self.assertIn("notes_revision", session_columns)
+
+    def test_english_owner_edit_is_atomic_and_invalidates_translation(self):
+        segments = [{
+            "speaker": "me", "start_ms": 0, "end_ms": 1000,
+            "text": "We will ship on Friday.",
+        }]
+        art = {
+            "title": "Friday launch", "overview_md": "### Launch\n- Friday.",
+            "summary": {"brief": "Ship Friday.", "decisions": [],
+                        "open_questions": []},
+            "outline": [], "keywords": [], "tags": [],
+            "actions": [{"text": "Ship it", "assignee": "me", "source_ms": 0}],
+        }
+        with db.closing_conn() as conn:
+            db.upsert_session(conn, "edited", "2026-08-30T10:00:00+00:00", 1,
+                              "test", segments, False, False)
+            db.save_ai_artifacts(conn, "edited", art)
+            conn.execute(
+                """INSERT INTO artifacts_lang
+                   (session_id,lang,title,overview_md,summary_json,outline_json,keywords_json)
+                   VALUES ('edited','ru','Запуск','Заметки','{}','[]','[]')""")
+            conn.execute("UPDATE actions SET ru_text='Отправить' WHERE session_id='edited'")
+            saved = db.save_manual_notes(
+                conn, "edited", "en", "Owner title", "### Owner notes", {
+                    "brief": "Owner brief",
+                    "decisions": [{"text": "Keep Friday", "source_ms": 0}],
+                    "open_questions": [],
+                }, expected_revision=1)
+            stale = db.save_manual_notes(
+                conn, "edited", "en", "Stale title", "", {
+                    "brief": "Stale brief", "decisions": [], "open_questions": [],
+                }, expected_revision=1)
+            row = conn.execute("SELECT * FROM sessions WHERE id='edited'").fetchone()
+            translated = conn.execute(
+                "SELECT count(*) FROM artifacts_lang WHERE session_id='edited'").fetchone()[0]
+            action = conn.execute(
+                "SELECT ru_text FROM actions WHERE session_id='edited'").fetchone()
+        self.assertTrue(saved)
+        self.assertFalse(stale)
+        self.assertEqual(row["artifacts_revision"], 2)
+        self.assertEqual(row["notes_revision"], 2)
+        self.assertIsNotNone(row["notes_edited_at"])
+        self.assertEqual(row["title"], "Owner title")
+        self.assertEqual(json.loads(row["summary_json"])["brief"], "Owner brief")
+        self.assertEqual(translated, 0)
+        self.assertIsNone(action["ru_text"])
+
+    def test_russian_owner_edit_preserves_english_revision(self):
+        segments = [{
+            "speaker": "me", "start_ms": 0, "end_ms": 1000, "text": "Decision.",
+        }]
+        art = {
+            "title": "English title", "overview_md": "### Notes",
+            "summary": {"brief": "English brief", "decisions": [],
+                        "open_questions": []},
+            "outline": [], "keywords": [], "tags": [], "actions": [],
+        }
+        with db.closing_conn() as conn:
+            db.upsert_session(conn, "ru-edit", "2026-08-30T10:00:00+00:00", 1,
+                              "test", segments, False, False)
+            db.save_ai_artifacts(conn, "ru-edit", art)
+            conn.execute(
+                """INSERT INTO artifacts_lang
+                   (session_id,lang,title,overview_md,summary_json,outline_json,keywords_json)
+                   VALUES ('ru-edit','ru','Старое','### Старое',
+                           '{"brief":"Старое","decisions":[],"open_questions":[]}',
+                           '[]','[]')""")
+            saved = db.save_manual_notes(
+                conn, "ru-edit", "ru", "Новое название", "### Новые заметки", {
+                    "brief": "Новое резюме", "decisions": [], "open_questions": [],
+                }, expected_revision=0)
+            en = conn.execute(
+                "SELECT title,artifacts_revision,notes_edited_at FROM sessions WHERE id='ru-edit'"
+            ).fetchone()
+            ru = conn.execute(
+                "SELECT title,summary_json,notes_edited_at FROM artifacts_lang"
+                " WHERE session_id='ru-edit' AND lang='ru'").fetchone()
+        self.assertTrue(saved)
+        self.assertEqual(dict(en), {
+            "title": "English title", "artifacts_revision": 1, "notes_edited_at": None,
+        })
+        self.assertEqual(ru["title"], "Новое название")
+        self.assertEqual(json.loads(ru["summary_json"])["brief"], "Новое резюме")
+        self.assertIsNotNone(ru["notes_edited_at"])
+        with db.closing_conn() as conn:
+            en_saved = db.save_manual_notes(
+                conn, "ru-edit", "en", "Updated English", "### Updated", {
+                    "brief": "Updated English brief", "decisions": [],
+                    "open_questions": [],
+                }, expected_revision=1)
+            preserved = conn.execute(
+                "SELECT title,notes_revision,notes_edited_at FROM artifacts_lang"
+                " WHERE session_id='ru-edit' AND lang='ru'").fetchone()
+        self.assertTrue(en_saved)
+        self.assertEqual(preserved["title"], "Новое название")
+        self.assertEqual(preserved["notes_revision"], 1)
+        self.assertIsNotNone(preserved["notes_edited_at"])
 
 
 if __name__ == "__main__":

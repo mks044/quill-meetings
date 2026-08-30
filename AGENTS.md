@@ -143,7 +143,10 @@ Tell the operator, in their words:
   ends the recording cleanly — it transcribes and uploads on wake.
 - **Notes** appear automatically. Meetings open on **Summary** (outcome,
   decisions, topic notes, open questions, and actions); the verbatim record is
-  under **Transcript**. `••• → Regenerate summary` re-runs the AI.
+  under **Transcript**. `••• → Edit notes` corrects the current EN/RU note;
+  **Copy summary** excludes the transcript, while **Copy full meeting** exports
+  everything as Markdown. `••• → Regenerate summary` re-runs the AI and warns
+  before replacing owner edits.
 - **Ask**: use the meeting's **Ask** tab, or the workspace **Ask** view to query
   every meeting at once.
 - **Share**: opens a read-only link for one meeting — no account needed on the

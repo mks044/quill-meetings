@@ -249,12 +249,106 @@ def get_session(session_id: str, lang: str = "en"):
             # empty localized summary in that case so the client derives its
             # lead from the translated overview instead of mixing in English.
             d["summary"] = _json.loads(alt["summary_json"] or "{}")
+            d["notes_edited"] = bool(alt["notes_edited_at"])
+            d["notes_revision"] = alt["notes_revision"]
             d["outline"] = _json.loads(alt["outline_json"] or "[]") or d["outline"]
             d["keywords"] = _json.loads(alt["keywords_json"] or "[]") or d["keywords"]
             for a in d["actions"]:
                 if a.get("ru_text"):
                     a["text"] = a["ru_text"]
     return d
+
+
+class NoteItemEdit(BaseModel):
+    text: str
+    source_ms: int | None = None
+
+
+class SummaryEdit(BaseModel):
+    brief: str
+    decisions: list[NoteItemEdit]
+    open_questions: list[NoteItemEdit]
+
+
+class NotesEdit(BaseModel):
+    expected_revision: int
+    title: str
+    overview_md: str
+    summary: SummaryEdit
+
+
+def _clean_note_edit(body: NotesEdit, duration_s: float) -> tuple[str, str, dict]:
+    title = body.title.strip()
+    overview = body.overview_md.strip()
+    brief = body.summary.brief.strip()
+    if not title:
+        raise HTTPException(422, "title cannot be blank")
+    if len(title) > 160:
+        raise HTTPException(422, "title is too long (160 characters max)")
+    if not brief:
+        raise HTTPException(422, "brief cannot be blank")
+    if len(brief) > 2000:
+        raise HTTPException(422, "brief is too long (2,000 characters max)")
+    if len(overview) > 50_000:
+        raise HTTPException(422, "detailed notes are too long (50,000 characters max)")
+
+    def items(values: list[NoteItemEdit], label: str) -> list[dict]:
+        if len(values) > 20:
+            raise HTTPException(422, f"too many {label} (20 max)")
+        cleaned = []
+        for value in values:
+            text = value.text.strip()
+            if not text:
+                continue
+            if len(text) > 2000:
+                raise HTTPException(422, f"{label} item is too long (2,000 characters max)")
+            ms = value.source_ms
+            if ms is not None:
+                if type(ms) is not int or ms < 0 or ms > round(duration_s * 1000):
+                    raise HTTPException(422, f"{label} timestamp is outside the recording")
+            cleaned.append({"text": text, "source_ms": ms})
+        return cleaned
+
+    summary = {
+        "brief": brief,
+        "decisions": items(body.summary.decisions, "decision"),
+        "open_questions": items(body.summary.open_questions, "open question"),
+    }
+    return title, overview, summary
+
+
+@app.patch("/api/sessions/{session_id}/notes")
+def edit_notes(session_id: str, body: NotesEdit, lang: str = "en"):
+    if lang not in ("en", "ru"):
+        raise HTTPException(400, "only en and ru are supported")
+    with db.closing_conn() as conn:
+        row = conn.execute(
+            "SELECT duration_s, ai_status, notes_revision FROM sessions WHERE id=?",
+            (session_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown session")
+        if row["ai_status"] != "done":
+            raise HTTPException(409, "notes can only be edited after processing finishes")
+        if type(body.expected_revision) is not int or body.expected_revision < 0:
+            raise HTTPException(422, "invalid notes revision")
+        if lang == "en":
+            current_revision = row["notes_revision"]
+        else:
+            alt = conn.execute(
+                "SELECT notes_revision FROM artifacts_lang WHERE session_id=? AND lang=?",
+                (session_id, lang)).fetchone()
+            if not alt:
+                raise HTTPException(409, "Russian notes are not ready — translate first")
+            current_revision = alt["notes_revision"]
+        if current_revision != body.expected_revision:
+            raise HTTPException(409, "notes changed in another window — reload and try again")
+        title, overview, summary = _clean_note_edit(body, row["duration_s"])
+        if not db.save_manual_notes(
+                conn, session_id, lang, title, overview, summary,
+                body.expected_revision):
+            raise HTTPException(409, "notes changed while saving — reload and try again")
+    return get_session(session_id, lang=lang)
 
 
 @app.post("/api/ingest/{session_id}")

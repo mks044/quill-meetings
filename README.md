@@ -30,6 +30,8 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
 
 - **Summary first** — every meeting opens on a concise outcome, explicit
   decisions, topic-organized notes, open questions, and source-linked actions.
+- **Your notes stay yours** — correct the title or structured EN/RU summary in
+  place, copy the useful summary alone, or copy the full meeting as Markdown.
 - **Transcript on demand** — a secondary tab with speaker-separated turns;
   click a line to hear that moment, follow the audio, or search every word.
 - **AI notes** — title, readable brief, chapters, keywords, tags, and action
@@ -40,7 +42,8 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
 - **Multilingual** — Whisper handles ~100 languages and mixed-language calls;
   notes generate in your working language with an on-demand translation toggle.
 - **Share links** — read-only page for a single meeting, no account needed on
-  the other end, revocable in one click.
+  the other end, revocable in one click; recipients can copy the summary but
+  cannot edit the owner's note.
 
 ## How it fits together
 

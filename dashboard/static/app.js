@@ -99,6 +99,225 @@ function summaryModel(s) {
   };
 }
 
+const mdLine = (value) => String(value || "").replace(/\s*\n\s*/g, " ").trim();
+
+function summaryMarkdown(s, lang) {
+  const summary = summaryModel(s);
+  const when = new Date(s.started_at).toLocaleString(lang === "ru" ? "ru-RU" : "en-US", {
+    year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+  const lines = [`# ${mdLine(s.title || s.id)}`, "", `${when} · ${fmtDur(s.duration_s)}`, ""];
+  if (summary.brief) lines.push(`## ${copy(lang, "At a glance", "Главное")}`, "", summary.brief, "");
+  if (summary.decisions.length) {
+    lines.push(`## ${copy(lang, "Decisions", "Решения")}`, "");
+    for (const item of summary.decisions)
+      lines.push(`- ${mdLine(item.text)}${item.source_ms != null ? ` (${fmt(item.source_ms)})` : ""}`);
+    lines.push("");
+  }
+  if (s.overview_md) lines.push(`## ${copy(lang, "Detailed notes", "Подробные заметки")}`, "", s.overview_md.trim(), "");
+  if (summary.openQuestions.length) {
+    lines.push(`## ${copy(lang, "Still open", "Осталось решить")}`, "");
+    for (const item of summary.openQuestions)
+      lines.push(`- ${mdLine(item.text)}${item.source_ms != null ? ` (${fmt(item.source_ms)})` : ""}`);
+    lines.push("");
+  }
+  if ((s.actions || []).length) {
+    lines.push(`## ${copy(lang, "Action items", "Задачи")}`, "");
+    for (const action of s.actions) {
+      const owner = action.assignee ? ` @${mdLine(action.assignee)}` : "";
+      const source = action.source_ms != null ? ` (${fmt(action.source_ms)})` : "";
+      lines.push(`- [${action.done ? "x" : " "}] ${mdLine(action.text)}${owner}${source}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n").trim() + "\n";
+}
+
+function fullMeetingMarkdown(s, lang) {
+  const lines = [summaryMarkdown(s, lang).trim(), "", `## ${copy(lang, "Transcript", "Транскрипт")}`, ""];
+  for (const segment of s.segments || []) {
+    const speaker = segment.speaker === "me" ? copy(lang, "Me", "Я") : copy(lang, "Guest", "Собеседник");
+    lines.push(`[${fmt(segment.start_ms)}] **${speaker}:** ${mdLine(segment.text)}`);
+  }
+  return lines.join("\n").trim() + "\n";
+}
+
+function showToast(message) {
+  let region = $("#toast-region");
+  if (!region) {
+    region = document.createElement("div");
+    region.id = "toast-region";
+    region.className = "toast-region";
+    region.setAttribute("aria-live", "polite");
+    document.body.appendChild(region);
+  }
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.textContent = message;
+  region.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add("visible"));
+  setTimeout(() => {
+    toast.classList.remove("visible");
+    setTimeout(() => toast.remove(), 180);
+  }, 2200);
+}
+
+async function copyText(text, lang, successMessage) {
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    }
+  } catch { /* fall through to the local textarea path */ }
+  if (!copied) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.className = "clipboard-buffer";
+    area.setAttribute("readonly", "");
+    document.body.appendChild(area);
+    area.select();
+    try { copied = document.execCommand("copy"); } catch { copied = false; }
+    area.remove();
+  }
+  if (copied) showToast(successMessage);
+  else prompt(copy(lang, "Copy the Markdown:", "Скопируйте Markdown:"), text);
+  return copied;
+}
+
+function editRowsHTML(items, kind, lang) {
+  const kindLabel = kind === "decision"
+    ? copy(lang, "decision", "решение")
+    : copy(lang, "open question", "открытый вопрос");
+  return items.map((item) => `<div class="note-edit-row" data-source-ms="${item.source_ms ?? ""}">
+    <input value="${esc(item.text)}" maxlength="2000" aria-label="${esc(copy(lang, `Edit ${kindLabel}`, `Изменить: ${kindLabel}`))}">
+    <span class="edit-source">${item.source_ms != null ? fmt(item.source_ms) : copy(lang, "No source", "Без источника")}</span>
+    <button type="button" class="edit-remove" aria-label="${copy(lang, "Remove", "Удалить")}">×</button>
+  </div>`).join("");
+}
+
+function openNotesEditor(s, lang, onSaved) {
+  $("#notes-editor-backdrop")?.remove();
+  const summary = summaryModel(s);
+  const backdrop = document.createElement("div");
+  backdrop.id = "notes-editor-backdrop";
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `<div class="notes-editor" role="dialog" aria-modal="true" aria-labelledby="notes-editor-title">
+    <form id="notes-editor-form">
+      <header class="editor-head">
+        <div><div class="section-kicker">${copy(lang, "Owner note", "Заметка владельца")}</div>
+          <h2 id="notes-editor-title">${copy(lang, "Edit meeting notes", "Редактировать заметки")}</h2></div>
+        <button type="button" class="editor-close" aria-label="${copy(lang, "Close editor", "Закрыть редактор")}">×</button>
+      </header>
+      <div class="editor-scroll">
+        <label class="edit-field"><span>${copy(lang, "Meeting title", "Название встречи")}</span>
+          <input id="edit-title" value="${esc(s.title || s.id)}" maxlength="160" required></label>
+        <label class="edit-field"><span>${copy(lang, "At a glance", "Главное")}</span>
+          <textarea id="edit-brief" maxlength="2000" required>${esc(summary.brief)}</textarea></label>
+        <section class="edit-list-section">
+          <div class="edit-list-head"><h3>${copy(lang, "Decisions", "Решения")}</h3>
+            <button type="button" data-add-row="decisions">+ ${copy(lang, "Add", "Добавить")}</button></div>
+          <div class="edit-list" data-edit-list="decisions">${editRowsHTML(summary.decisions, "decision", lang)}</div>
+        </section>
+        <label class="edit-field"><span>${copy(lang, "Detailed notes (Markdown)", "Подробные заметки (Markdown)")}</span>
+          <textarea id="edit-overview" class="edit-overview" maxlength="50000">${esc(s.overview_md || "")}</textarea></label>
+        <section class="edit-list-section">
+          <div class="edit-list-head"><h3>${copy(lang, "Still open", "Осталось решить")}</h3>
+            <button type="button" data-add-row="open_questions">+ ${copy(lang, "Add", "Добавить")}</button></div>
+          <div class="edit-list" data-edit-list="open_questions">${editRowsHTML(summary.openQuestions, "open question", lang)}</div>
+        </section>
+      </div>
+      <div class="editor-error" id="editor-error" role="alert"></div>
+      <footer class="editor-foot">
+        <button type="button" class="btn editor-cancel">${copy(lang, "Cancel", "Отмена")}</button>
+        <button type="submit" class="btn primary editor-save">${copy(lang, "Save notes", "Сохранить")}</button>
+      </footer>
+    </form>
+  </div>`;
+  document.body.appendChild(backdrop);
+  document.body.classList.add("modal-open");
+  const form = $("#notes-editor-form", backdrop);
+  let dirty = false;
+  let saving = false;
+  const returnFocus = $("#btn-more") || document.activeElement;
+
+  const close = (force = false) => {
+    if (saving) return;
+    if (!force && dirty && !confirm(copy(lang, "Discard your unsaved changes?", "Отменить несохранённые изменения?"))) return;
+    document.removeEventListener("keydown", onKeydown);
+    document.body.classList.remove("modal-open");
+    backdrop.remove();
+    returnFocus?.focus?.();
+  };
+  const onKeydown = (event) => {
+    if (event.key === "Escape") { close(); return; }
+    if (event.key !== "Tab") return;
+    const focusable = [...backdrop.querySelectorAll(
+      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    )].filter((element) => element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  };
+  document.addEventListener("keydown", onKeydown);
+  form.addEventListener("input", () => { dirty = true; });
+  backdrop.addEventListener("click", (event) => { if (event.target === backdrop) close(); });
+  $(".editor-close", backdrop).addEventListener("click", () => close());
+  $(".editor-cancel", backdrop).addEventListener("click", () => close());
+  backdrop.addEventListener("click", (event) => {
+    const add = event.target.closest("[data-add-row]");
+    if (add) {
+      const list = $(`[data-edit-list="${add.dataset.addRow}"]`, backdrop);
+      list.insertAdjacentHTML("beforeend", editRowsHTML([{ text: "", source_ms: null }], add.dataset.addRow === "decisions" ? "decision" : "open question", lang));
+      list.lastElementChild.querySelector("input").focus();
+      dirty = true;
+      return;
+    }
+    const remove = event.target.closest(".edit-remove");
+    if (remove) { remove.closest(".note-edit-row").remove(); dirty = true; }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (saving) return;
+    const collect = (kind) => [...backdrop.querySelectorAll(`[data-edit-list="${kind}"] .note-edit-row`)]
+      .map((row) => ({
+        text: row.querySelector("input").value.trim(),
+        source_ms: row.dataset.sourceMs === "" ? null : +row.dataset.sourceMs,
+      })).filter((item) => item.text);
+    const payload = {
+      expected_revision: s.notes_revision,
+      title: $("#edit-title", backdrop).value.trim(),
+      overview_md: $("#edit-overview", backdrop).value.trim(),
+      summary: {
+        brief: $("#edit-brief", backdrop).value.trim(),
+        decisions: collect("decisions"),
+        open_questions: collect("open_questions"),
+      },
+    };
+    const save = $(".editor-save", backdrop);
+    const error = $("#editor-error", backdrop);
+    saving = true; save.disabled = true; error.textContent = "";
+    save.textContent = copy(lang, "Saving…", "Сохраняю…");
+    try {
+      const fresh = await api(`/api/sessions/${encodeURIComponent(s.id)}/notes?lang=${lang}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      dirty = false; saving = false; close(true);
+      showToast(copy(lang, "Notes saved", "Заметки сохранены"));
+      onSaved(fresh);
+    } catch (err) {
+      error.textContent = err.message;
+      saving = false; save.disabled = false;
+      save.textContent = copy(lang, "Save notes", "Сохранить");
+    }
+  });
+  $("#edit-title", backdrop).focus();
+}
+
 function sourceListHTML(items, lang) {
   return `<ul class="source-list">${items.map((item) => `<li>
     <span>${esc(item.text)}</span>
@@ -373,10 +592,11 @@ async function sharedView(token) {
   const durationMs = Math.max(s.duration_s * 1000, 1);
 
   view.innerHTML = `<div class="meeting-page shared-meeting">
-    <header class="meeting-header">
-      <div class="meeting-eyebrow">${copy(lang, "Shared meeting", "Встреча по ссылке")}</div>
-      <h1>${esc(s.title || s.id)}</h1>
-      <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span></div>
+    <header class="meeting-header shared-header">
+      <div><div class="meeting-eyebrow">${copy(lang, "Shared meeting", "Встреча по ссылке")}</div>
+        <h1>${esc(s.title || s.id)}</h1>
+        <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span></div></div>
+      <button class="btn shared-copy" id="shared-copy-summary">${copy(lang, "Copy summary", "Скопировать резюме")}</button>
     </header>
     <nav class="meeting-tabs" role="tablist" aria-label="${copy(lang, "Meeting view", "Раздел встречи")}">
       <button id="shared-tab-summary" role="tab" aria-selected="true" aria-controls="shared-summary" data-meeting-tab="summary">${copy(lang, "Summary", "Резюме")}</button>
@@ -405,6 +625,8 @@ async function sharedView(token) {
   view.querySelectorAll("[data-meeting-tab]").forEach((button) => {
     button.addEventListener("click", () => setTab(button.dataset.meetingTab));
   });
+  $("#shared-copy-summary")?.addEventListener("click", () => copyText(
+    summaryMarkdown(s, lang), lang, copy(lang, "Summary copied", "Резюме скопировано")));
   view.addEventListener("click", (e) => {
     const jump = e.target.closest("[data-jump-ms]");
     const moment = jump || e.target.closest("[data-ms]");
@@ -508,10 +730,10 @@ function cardHTML(s) {
 
 // ---------------------------------------------------------------- meeting
 
-async function meetingView(id, gen) {
+async function meetingView(id, gen, prefetched = null) {
   setNav("");
   const wantLang = localStorage.getItem("quill_lang") || "en";
-  const s = await api(`/api/sessions/${encodeURIComponent(id)}?lang=${wantLang}`);
+  const s = prefetched || await api(`/api/sessions/${encodeURIComponent(id)}?lang=${wantLang}`);
   if (stale(gen)) return;
   const lang = s.lang;
   const d = dateParts(s.started_at);
@@ -554,6 +776,7 @@ async function meetingView(id, gen) {
           <div class="meet-meta">
             <span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span>
             ${(s.tags || []).map((tag) => `<span class="chip tag">${esc(tag)}</span>`).join("")}
+            ${s.notes_edited ? `<span class="edited-badge">${copy(lang, "Edited", "Изменено")}</span>` : ""}
             ${s.ai_status !== "done" ? `<span class="ai-badge ${s.ai_status}">${esc(aiLabel(s, lang))}</span>` : ""}
           </div>
         </div>
@@ -566,6 +789,10 @@ async function meetingView(id, gen) {
           <div class="more-wrap">
             <button class="icon-btn" id="btn-more" aria-label="${copy(lang, "More meeting actions", "Другие действия")}" aria-expanded="false">•••</button>
             <div class="meeting-menu hidden" id="meeting-menu" role="menu">
+              <button id="btn-edit-notes" role="menuitem">✎ ${copy(lang, "Edit notes", "Редактировать заметки")}</button>
+              <button id="btn-copy-summary" role="menuitem">⧉ ${copy(lang, "Copy summary", "Скопировать резюме")}</button>
+              <button id="btn-copy-full" role="menuitem">⇩ ${copy(lang, "Copy full meeting", "Скопировать всю встречу")}</button>
+              <span class="menu-divider" role="separator"></span>
               <button id="btn-regen" role="menuitem">↻ ${copy(lang, "Regenerate summary", "Создать резюме заново")}</button>
               <button class="hidden" id="btn-unshare" role="menuitem">${copy(lang, "Revoke share link", "Отозвать ссылку")}</button>
               <button class="danger" id="btn-del" role="menuitem">${copy(lang, "Delete meeting", "Удалить встречу")}</button>
@@ -731,6 +958,23 @@ async function meetingView(id, gen) {
       moreButton.focus();
     }
   });
+  $("#btn-edit-notes").addEventListener("click", () => {
+    meetingMenu.classList.add("hidden");
+    moreButton.setAttribute("aria-expanded", "false");
+    openNotesEditor(s, lang, (fresh) => meetingView(s.id, undefined, fresh));
+  });
+  $("#btn-copy-summary").addEventListener("click", async () => {
+    meetingMenu.classList.add("hidden");
+    moreButton.setAttribute("aria-expanded", "false");
+    await copyText(summaryMarkdown(s, lang), lang,
+      copy(lang, "Summary copied", "Резюме скопировано"));
+  });
+  $("#btn-copy-full").addEventListener("click", async () => {
+    meetingMenu.classList.add("hidden");
+    moreButton.setAttribute("aria-expanded", "false");
+    await copyText(fullMeetingMarkdown(s, lang), lang,
+      copy(lang, "Full meeting copied", "Вся встреча скопирована"));
+  });
 
   api(`/api/sessions/${encodeURIComponent(s.id)}/share`).then(({ token }) => {
     if (token) $("#btn-unshare").classList.remove("hidden");
@@ -805,6 +1049,9 @@ async function meetingView(id, gen) {
   }
 
   $("#btn-regen").addEventListener("click", async () => {
+    if (s.notes_edited && !confirm(copy(lang,
+      "Regenerating replaces your edited title and notes. Continue?",
+      "Пересоздание заменит изменённые название и заметки. Продолжить?"))) return;
     await post(`/api/sessions/${encodeURIComponent(s.id)}/regenerate`);
     $("#btn-regen").textContent = copy(lang, "AI is rebuilding the summary…", "ИИ пересобирает резюме…");
     meetingMenu.classList.add("hidden");

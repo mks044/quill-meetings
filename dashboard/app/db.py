@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     ai_attempts INTEGER NOT NULL DEFAULT 0,
     ai_retry_at TEXT,
     artifacts_revision INTEGER NOT NULL DEFAULT 0,
+    notes_revision INTEGER NOT NULL DEFAULT 0,
+    notes_edited_at TEXT,
     segments_hash TEXT,
     has_audio_mic INTEGER NOT NULL DEFAULT 0,
     has_audio_system INTEGER NOT NULL DEFAULT 0,
@@ -66,6 +68,8 @@ CREATE TABLE IF NOT EXISTS artifacts_lang (
     summary_json TEXT,
     outline_json TEXT,
     keywords_json TEXT,
+    notes_revision INTEGER NOT NULL DEFAULT 0,
+    notes_edited_at TEXT,
     PRIMARY KEY (session_id, lang)
 );
 
@@ -115,6 +119,10 @@ def init() -> None:
             "ALTER TABLE sessions ADD COLUMN summary_json TEXT",
             "ALTER TABLE artifacts_lang ADD COLUMN summary_json TEXT",
             "ALTER TABLE sessions ADD COLUMN artifacts_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN notes_edited_at TEXT",
+            "ALTER TABLE artifacts_lang ADD COLUMN notes_edited_at TEXT",
+            "ALTER TABLE sessions ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE artifacts_lang ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 conn.execute(stmt)
@@ -219,7 +227,9 @@ def _save_ai_artifacts(conn, session_id, art) -> None:
         """UPDATE sessions SET title=?, overview_md=?, summary_json=?, outline_json=?,
            keywords_json=?, tags_json=?, ai_status='done', ai_error=NULL,
            ai_attempts=0, ai_retry_at=NULL,
-           artifacts_revision=artifacts_revision+1
+           artifacts_revision=artifacts_revision+1,
+           notes_revision=notes_revision+1,
+           notes_edited_at=NULL
            WHERE id=?""",
         (art["title"], art["overview_md"], json.dumps(art.get("summary", {})),
          json.dumps(art.get("outline", [])),
@@ -238,9 +248,47 @@ def _save_ai_artifacts(conn, session_id, art) -> None:
              int(a["text"] in done_texts)))
 
 
+def save_manual_notes(conn, session_id: str, lang: str, title: str,
+                      overview_md: str, summary: dict,
+                      expected_revision: int) -> bool:
+    """Persist an owner edit without touching transcript/audio/action truth.
+
+    English is the canonical source for translations, so an English edit bumps
+    the artifact revision and invalidates every derived language atomically.
+    A translated edit stays local to that language. Returns False when the
+    requested row vanished or (for translated edits) was never generated.
+    """
+    payload = json.dumps(summary, ensure_ascii=False)
+    if lang == "en":
+        cur = conn.execute(
+            """UPDATE sessions SET title=?, overview_md=?, summary_json=?,
+               artifacts_revision=artifacts_revision+1,
+               notes_revision=notes_revision+1,
+               notes_edited_at=datetime('now')
+               WHERE id=? AND ai_status='done' AND notes_revision=?""",
+            (title, overview_md, payload, session_id, expected_revision))
+        if cur.rowcount == 0:
+            return False
+        # Machine translations are derived cache and must be rebuilt. A row the
+        # owner explicitly edited is independent content: preserve it, then
+        # refresh only its action translations on next RU use.
+        conn.execute(
+            "DELETE FROM artifacts_lang WHERE session_id=? AND notes_edited_at IS NULL",
+            (session_id,))
+        conn.execute("UPDATE actions SET ru_text=NULL WHERE session_id=?", (session_id,))
+        return True
+    cur = conn.execute(
+        """UPDATE artifacts_lang SET title=?, overview_md=?, summary_json=?,
+           notes_revision=notes_revision+1, notes_edited_at=datetime('now')
+           WHERE session_id=? AND lang=? AND notes_revision=?""",
+        (title, overview_md, payload, session_id, lang, expected_revision))
+    return cur.rowcount > 0
+
+
 def session_row_to_dict(row) -> dict:
     d = dict(row)
     for k in ("outline_json", "keywords_json", "tags_json"):
         d[k.replace("_json", "")] = json.loads(d.pop(k) or "[]")
     d["summary"] = json.loads(d.pop("summary_json", None) or "{}")
+    d["notes_edited"] = bool(d.pop("notes_edited_at", None))
     return d
