@@ -1,5 +1,39 @@
 # Project status
 
+## Shipped 2026-08-30 — summary-first meeting workspace
+
+The dashboard now opens each meeting on a useful summary instead of a wall of
+transcript. The primary page contains a concise “At a glance” brief, explicit
+decisions, topic-organized detailed notes, unresolved questions, and a focused
+action/timeline rail. Transcript and Ask are dedicated tabs; source timestamps
+open the exact transcript moment. The library, private meeting view, read-only
+share view, login surface, and mobile layout use the same quiet workspace
+design, while the existing EN/RU control remains intact.
+
+AI artifacts now persist a structured brief, decisions, open questions, and
+their provenance timestamps for both English and Russian. Artifact revisions
+prevent a slow translation from publishing over newly regenerated notes,
+including the zero-action race that action-ID checks could not detect. Legacy
+rows still render safely from their localized detailed notes.
+
+All six existing meetings were regenerated into the new contract. The two
+meetings that previously had Russian notes were translated again, so their RU
+views also contain the structured summary. Recordings, transcripts, completed
+actions, and audio files were not changed by the backfill.
+
+### Verification
+
+- Desktop, mobile, EN/RU, Transcript, Ask, source deep links, and public-share
+  flows passed real-browser checks with no console errors.
+- Dashboard reliability, Mac sync-agent, and shell sync regression suites pass.
+- All six live summaries have valid non-empty JSON; every decision/open-question
+  timestamp is within its recording duration.
+- Authenticated EN/RU and strict guest payload checks pass; Russian action text
+  is complete for both translated meetings.
+- Live queue is empty with no failed/retrying work, the service is active,
+  SQLite integrity is `ok`, and deployed static-file hashes match the tested
+  release at `b756744`.
+
 ## Shipped 2026-08-29 — visible sleep/wake processing and scheduled catch-up
 
 Session `2026.08.29-1415` recorded 7,244 seconds, finalized five seconds before
