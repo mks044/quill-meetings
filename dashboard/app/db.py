@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     engine TEXT,
     title TEXT,                       -- AI; falls back to id
     overview_md TEXT,                 -- AI topic-sectioned markdown
+    summary_json TEXT,                -- AI {brief, decisions, open_questions}
     outline_json TEXT,                -- AI [{ms,label}]
     keywords_json TEXT,               -- AI [str]
     tags_json TEXT,                   -- AI [str]
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     ai_error TEXT,
     ai_attempts INTEGER NOT NULL DEFAULT 0,
     ai_retry_at TEXT,
+    artifacts_revision INTEGER NOT NULL DEFAULT 0,
     segments_hash TEXT,
     has_audio_mic INTEGER NOT NULL DEFAULT 0,
     has_audio_system INTEGER NOT NULL DEFAULT 0,
@@ -61,6 +63,7 @@ CREATE TABLE IF NOT EXISTS artifacts_lang (
     lang TEXT NOT NULL,
     title TEXT,
     overview_md TEXT,
+    summary_json TEXT,
     outline_json TEXT,
     keywords_json TEXT,
     PRIMARY KEY (session_id, lang)
@@ -109,6 +112,9 @@ def init() -> None:
             "ALTER TABLE actions ADD COLUMN ru_text TEXT",
             "ALTER TABLE sessions ADD COLUMN ai_attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sessions ADD COLUMN ai_retry_at TEXT",
+            "ALTER TABLE sessions ADD COLUMN summary_json TEXT",
+            "ALTER TABLE artifacts_lang ADD COLUMN summary_json TEXT",
+            "ALTER TABLE sessions ADD COLUMN artifacts_revision INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 conn.execute(stmt)
@@ -210,11 +216,13 @@ def save_ai_artifacts(conn, session_id, art, expected_hash: str | None = None) -
 
 def _save_ai_artifacts(conn, session_id, art) -> None:
     conn.execute(
-        """UPDATE sessions SET title=?, overview_md=?, outline_json=?,
+        """UPDATE sessions SET title=?, overview_md=?, summary_json=?, outline_json=?,
            keywords_json=?, tags_json=?, ai_status='done', ai_error=NULL,
-           ai_attempts=0, ai_retry_at=NULL
+           ai_attempts=0, ai_retry_at=NULL,
+           artifacts_revision=artifacts_revision+1
            WHERE id=?""",
-        (art["title"], art["overview_md"], json.dumps(art.get("outline", [])),
+        (art["title"], art["overview_md"], json.dumps(art.get("summary", {})),
+         json.dumps(art.get("outline", [])),
          json.dumps(art.get("keywords", [])), json.dumps(art.get("tags", [])),
          session_id))
     conn.execute("DELETE FROM artifacts_lang WHERE session_id=?", (session_id,))
@@ -234,4 +242,5 @@ def session_row_to_dict(row) -> dict:
     d = dict(row)
     for k in ("outline_json", "keywords_json", "tags_json"):
         d[k.replace("_json", "")] = json.loads(d.pop(k) or "[]")
+    d["summary"] = json.loads(d.pop("summary_json", None) or "{}")
     return d

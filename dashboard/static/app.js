@@ -19,7 +19,7 @@ const fmt = (ms) => {
 const fmtDur = (sec) => sec >= 3600
   ? `${Math.floor(sec / 3600)}h ${Math.round((sec % 3600) / 60)}m`
   : sec >= 60 ? `${Math.round(sec / 60)} min` : `${Math.round(sec)}s`;
-const esc = (t) => t.replace(/[&<>"']/g, (c) => ({
+const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const dateParts = (iso) => {
   const d = new Date(iso);
@@ -69,6 +69,119 @@ function md(src) {
   }
   if (inList) out += "</ul>";
   return out;
+}
+
+const copy = (lang, en, ru) => lang === "ru" ? ru : en;
+
+function overviewLead(src, max = 420) {
+  const lines = String(src || "").split("\n").map((line) => line.trim());
+  const bullets = lines.filter((line) => /^[-*]\s/.test(line))
+    .slice(0, 2).map((line) => line.slice(2).replace(/\*\*/g, ""));
+  const prose = lines.filter((line) => line && !/^#{1,6}\s|^[-*]\s/.test(line))
+    .slice(0, 2).map((line) => line.replace(/\*\*/g, ""));
+  const text = (bullets.length ? bullets : prose).join(" ");
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max + 1).replace(/\s+\S*$/, "");
+  return `${cut}…`;
+}
+
+function summaryModel(s) {
+  const raw = s.summary && typeof s.summary === "object" ? s.summary : {};
+  const items = (value) => Array.isArray(value) ? value.filter((item) =>
+    item && typeof item === "object" && String(item.text || "").trim()).map((item) => ({
+      text: String(item.text).trim(),
+      source_ms: item.source_ms != null && Number.isFinite(+item.source_ms) ? +item.source_ms : null,
+    })) : [];
+  return {
+    brief: String(raw.brief || "").trim() || overviewLead(s.overview_md),
+    decisions: items(raw.decisions),
+    openQuestions: items(raw.open_questions),
+  };
+}
+
+function sourceListHTML(items, lang) {
+  return `<ul class="source-list">${items.map((item) => `<li>
+    <span>${esc(item.text)}</span>
+    ${item.source_ms != null ? `<button class="source-time" data-jump-ms="${item.source_ms}" title="${copy(lang, "Open transcript at", "Открыть транскрипт на")} ${fmt(item.source_ms)}">${fmt(item.source_ms)}</button>` : ""}
+  </li>`).join("")}</ul>`;
+}
+
+function summaryDocumentHTML(s, lang, { shared = false } = {}) {
+  const summary = summaryModel(s);
+  const status = s.ai_status && s.ai_status !== "done" ? `<div class="pipeline-note ${esc(s.ai_status)}">
+    <span class="pipeline-dot"></span><span>${esc(aiLabel(s, lang))}</span></div>` : "";
+  return `<article class="summary-paper">
+    ${status}
+    <section class="summary-lead">
+      <div class="section-kicker">${copy(lang, "At a glance", "Главное")}</div>
+      ${summary.brief
+        ? `<p>${esc(summary.brief)}</p>`
+        : `<p class="summary-empty">${copy(lang, "The summary is still being prepared.", "Краткое резюме ещё готовится.")}</p>`}
+    </section>
+    ${summary.decisions.length ? `<section class="summary-section summary-decisions">
+      <h2>${copy(lang, "Decisions", "Решения")}</h2>${sourceListHTML(summary.decisions, lang)}
+    </section>` : ""}
+    ${s.overview_md ? `<section class="summary-section">
+      <h2>${copy(lang, "Detailed notes", "Подробные заметки")}</h2>
+      <div class="overview">${md(s.overview_md)}</div>
+    </section>` : ""}
+    ${summary.openQuestions.length ? `<section class="summary-section summary-open">
+      <h2>${copy(lang, "Still open", "Осталось решить")}</h2>${sourceListHTML(summary.openQuestions, lang)}
+    </section>` : ""}
+    ${!shared ? `<button class="ask-launch" data-open-tab="ask">
+      <span><b>${copy(lang, "Ask about this meeting", "Спросить об этой встрече")}</b>
+      <small>${copy(lang, "Find a decision, quote, number, or next step", "Найти решение, цитату, число или следующий шаг")}</small></span>
+      <span aria-hidden="true">→</span>
+    </button>` : ""}
+  </article>`;
+}
+
+function meetingRailHTML(s, lang, { shared = false } = {}) {
+  const actions = s.actions || [];
+  return `<aside class="meeting-rail">
+    <section class="rail-card" id="p-actions">
+      <div class="rail-card-head"><h2>${copy(lang, "Action items", "Задачи")}</h2>
+        ${actions.length ? `<span>${actions.filter((a) => !a.done).length}</span>` : ""}</div>
+      ${actionsHTML(actions, { readonly: shared, lang })}
+    </section>
+    ${(s.outline || []).length ? `<section class="rail-card">
+      <div class="rail-card-head"><h2>${copy(lang, "Timeline", "По ходу встречи")}</h2></div>
+      <div class="chapter-list">${s.outline.map((o) => `<button data-jump-ms="${o.ms}">
+        <span>${fmt(o.ms)}</span><b>${esc(o.label)}</b></button>`).join("")}</div>
+    </section>` : ""}
+    ${(s.keywords || []).length ? `<section class="rail-card keywords-card">
+      <div class="rail-card-head"><h2>${copy(lang, "Topics", "Темы")}</h2></div>
+      <div class="kw-row">${s.keywords.map((k) => `<span class="chip">${esc(k)}</span>`).join("")}</div>
+    </section>` : ""}
+  </aside>`;
+}
+
+function transcriptPanelHTML(turns, lang, { searchable = true } = {}) {
+  return `<div class="transcript-panel">
+    <div class="tr-toolbar">
+      <div><span class="section-kicker">${copy(lang, "Verbatim record", "Дословная запись")}</span>
+        <h2>${copy(lang, "Transcript", "Транскрипт")}</h2></div>
+      ${searchable ? `<div class="tr-search">
+        <label><span class="sr-only">${copy(lang, "Find in transcript", "Найти в транскрипте")}</span>
+          <input id="tr-q" placeholder="${copy(lang, "Find in transcript", "Найти в транскрипте")}" autocomplete="off"></label>
+        <span class="cnt" id="tr-cnt"></span>
+        <button id="tr-prev" title="${copy(lang, "Previous result", "Предыдущий результат")}">↑</button>
+        <button id="tr-next" title="${copy(lang, "Next result", "Следующий результат")}">↓</button>
+      </div>` : ""}
+    </div>
+    <div class="tr-body">
+      ${searchable ? `<div class="time-rail" id="rail"><div class="rail-line"></div><div class="rail-needle" id="rail-needle" style="top:0"></div></div>` : ""}
+      <div class="turns" id="turns">
+        ${turns.map((t) => `<div class="turn ${t.speaker}">
+          <div class="turn-gutter">
+            <span class="turn-speaker">${t.speaker === "me" ? copy(lang, "Me", "Я") : copy(lang, "Guest", "Собеседник")}</span>
+            <button class="turn-ts" data-ms="${t.start}">${fmt(t.start)}</button>
+          </div>
+          <div class="turn-text">${t.segs.map((g) => `<span class="seg" data-ms="${g.start_ms}" data-idx="${g.idx}">${esc(g.text)}</span>`).join(" ")}</div>
+        </div>`).join("")}
+      </div>
+    </div>
+  </div>`;
 }
 
 // ---------------------------------------------------------------- player
@@ -147,7 +260,7 @@ function tick() { tickOnce(); rafId = requestAnimationFrame(tick); }
 
 const sync = {
   segments: [], els: [], railNeedle: null, railHeight: 0, durationMs: 0,
-  activeIdx: -1, follow: true, suppressScroll: false,
+  activeIdx: -1, follow: true, suppressScroll: false, visible: false,
 };
 
 function tickOnce() {
@@ -164,7 +277,7 @@ function tickOnce() {
     sync.activeIdx = idx;
     if (idx >= 0) {
       sync.els[idx]?.classList.add("active");
-      if (sync.follow && !audio.paused) {
+      if (sync.visible && sync.follow && !audio.paused) {
         sync.suppressScroll = true;
         sync.els[idx]?.scrollIntoView({ block: "center", behavior: "smooth" });
         setTimeout(() => { sync.suppressScroll = false; }, 600);
@@ -193,7 +306,7 @@ function findSegment(ms) {
 window.addEventListener("wheel", () => { if (sync.segments.length) breakFollow(); }, { passive: true });
 window.addEventListener("touchmove", () => { if (sync.segments.length) breakFollow(); }, { passive: true });
 function breakFollow() {
-  if (sync.suppressScroll || !sync.follow) return;
+  if (!sync.visible || sync.suppressScroll || !sync.follow) return;
   sync.follow = false;
   if (!$(".follow-pill") && player.sessionId && !audio.paused) {
     const pill = document.createElement("button");
@@ -213,8 +326,10 @@ const SHARE_TOKEN = location.pathname.startsWith("/s/")
 window.addEventListener("hashchange", () => { if (!SHARE_TOKEN) route(); });
 window.addEventListener("DOMContentLoaded", () => {
   if (SHARE_TOKEN) {
+    document.body.classList.add("share-mode");
     document.querySelector(".topnav").classList.add("hidden");
     document.querySelector(".top-search").classList.add("hidden");
+    document.querySelector(".privacy-mark").innerHTML = "<span></span>Read-only share";
     sharedView(SHARE_TOKEN);
     return;
   }
@@ -224,6 +339,25 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   route();
 });
+
+function groupTurns(segments) {
+  const turns = [];
+  for (const raw of segments || []) {
+    const seg = {
+      ...raw,
+      speaker: raw.speaker === "me" ? "me" : "them",
+      start_ms: +raw.start_ms || 0,
+      end_ms: +raw.end_ms || 0,
+    };
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === seg.speaker && seg.start_ms - last.end < 4000) {
+      last.segs.push(seg); last.end = seg.end_ms;
+    } else {
+      turns.push({ speaker: seg.speaker, start: seg.start_ms, end: seg.end_ms, segs: [seg] });
+    }
+  }
+  return turns;
+}
 
 async function sharedView(token) {
   let s;
@@ -235,52 +369,52 @@ async function sharedView(token) {
   const lang = s.lang;
   const d = dateParts(s.started_at);
   const tracks = [s.has_audio_mixed && "mixed", s.has_audio_system && "system", s.has_audio_mic && "mic"].filter(Boolean);
-  const turns = [];
-  for (const seg of s.segments) {
-    seg.speaker = seg.speaker === "me" ? "me" : "them";
-    seg.start_ms = +seg.start_ms || 0; seg.end_ms = +seg.end_ms || 0;
-    const last = turns[turns.length - 1];
-    if (last && last.speaker === seg.speaker && seg.start_ms - last.end < 4000) {
-      last.segs.push(seg); last.end = seg.end_ms;
-    } else turns.push({ speaker: seg.speaker, start: seg.start_ms, end: seg.end_ms, segs: [seg] });
-  }
+  const turns = groupTurns(s.segments);
   const durationMs = Math.max(s.duration_s * 1000, 1);
-  const L = (en, ru) => (lang === "ru" ? ru : en);
-  view.innerHTML = `
-  <div class="meet-head">
-    <h1>${esc(s.title || s.id)}</h1>
-    <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span class="sep">·</span>
-      <span>${fmtDur(s.duration_s)}</span></div>
-  </div>
-  <div class="meet-grid">
-    <div>
-      ${s.actions.length ? `<div class="panel"><h2>${L("Action items", "Задачи")}</h2>
-        ${s.actions.map((a) => `<div class="action-item ${a.done ? "done" : ""}">
-          <input type="checkbox" disabled ${a.done ? "checked" : ""}>
-          <span class="at">${esc(a.text)}${a.assignee ? `<span class="assignee">@${esc(a.assignee)}</span>` : ""}</span>
-        </div>`).join("")}</div>` : ""}
-      <div class="panel"><h2>${L("Overview", "Обзор")}</h2>
-        <div class="overview">${md(s.overview_md || "")}</div></div>
-      ${(s.outline || []).length ? `<div class="panel"><h2>${L("Chapters", "Главы")}</h2>
-        ${s.outline.map((o) => `<div class="outline-item" data-ms="${o.ms}">
-          <span class="ts">${fmt(o.ms)}</span><span>${esc(o.label)}</span></div>`).join("")}</div>` : ""}
-    </div>
-    <div class="transcript-panel">
-      <div class="tr-toolbar"><h2>${L("Transcript", "Транскрипт")}</h2></div>
-      <div class="tr-body">
-        <div class="turns" style="padding-left:22px">
-          ${turns.map((t) => `
-            <div class="turn ${t.speaker}">
-              <div class="turn-gutter">
-                <span class="turn-speaker">${t.speaker === "me" ? L("Me", "Я") : L("Guest", "Собеседник")}</span>
-                <span class="turn-ts" data-ms="${t.start}">${fmt(t.start)}</span>
-              </div>
-              <div class="turn-text">${t.segs.map((g) => `<span class="seg" data-ms="${g.start_ms}" data-idx="${g.idx}">${esc(g.text)}</span>`).join(" ")}</div>
-            </div>`).join("")}
-        </div>
-      </div>
-    </div>
+
+  view.innerHTML = `<div class="meeting-page shared-meeting">
+    <header class="meeting-header">
+      <div class="meeting-eyebrow">${copy(lang, "Shared meeting", "Встреча по ссылке")}</div>
+      <h1>${esc(s.title || s.id)}</h1>
+      <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span></div>
+    </header>
+    <nav class="meeting-tabs" role="tablist" aria-label="${copy(lang, "Meeting view", "Раздел встречи")}">
+      <button id="shared-tab-summary" role="tab" aria-selected="true" aria-controls="shared-summary" data-meeting-tab="summary">${copy(lang, "Summary", "Резюме")}</button>
+      <button id="shared-tab-transcript" role="tab" aria-selected="false" aria-controls="shared-transcript" data-meeting-tab="transcript">${copy(lang, "Transcript", "Транскрипт")}</button>
+    </nav>
+    <section id="shared-summary" class="meeting-panel" role="tabpanel" aria-labelledby="shared-tab-summary" data-meeting-panel="summary">
+      <div class="summary-layout">${summaryDocumentHTML(s, lang, { shared: true })}${meetingRailHTML(s, lang, { shared: true })}</div>
+    </section>
+    <section id="shared-transcript" class="meeting-panel" role="tabpanel" aria-labelledby="shared-tab-transcript" data-meeting-panel="transcript" hidden>
+      ${transcriptPanelHTML(turns, lang, { searchable: false })}
+    </section>
   </div>`;
+
+  const setTab = (name) => {
+    view.querySelectorAll("[data-meeting-tab]").forEach((button) => {
+      const active = button.dataset.meetingTab === name;
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    view.querySelectorAll("[data-meeting-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.meetingPanel !== name;
+    });
+    sync.visible = name === "transcript";
+  };
+
+  view.querySelectorAll("[data-meeting-tab]").forEach((button) => {
+    button.addEventListener("click", () => setTab(button.dataset.meetingTab));
+  });
+  view.addEventListener("click", (e) => {
+    const jump = e.target.closest("[data-jump-ms]");
+    const moment = jump || e.target.closest("[data-ms]");
+    if (!moment) return;
+    if (jump) setTab("transcript");
+    const ms = +(jump?.dataset.jumpMs ?? moment.dataset.ms);
+    player.seek(ms); tickOnce();
+    if (jump) setTimeout(() => sync.els[findSegment(ms)]?.scrollIntoView({ block: "center" }), 50);
+  });
+
   if (tracks.length) {
     player.audioBase = `/api/shared/${token}/audio`;
     player.load(s.id, tracks);
@@ -288,10 +422,7 @@ async function sharedView(token) {
   sync.segments = s.segments;
   sync.els = [...view.querySelectorAll(".seg")].sort((a, b) => a.dataset.idx - b.dataset.idx);
   sync.durationMs = durationMs;
-  view.addEventListener("click", (e) => {
-    const el = e.target.closest("[data-ms]");
-    if (el) { player.seek(+el.dataset.ms); tickOnce(); }
-  });
+  setTab("summary");
 }
 
 function setNav(name) {
@@ -303,7 +434,7 @@ let navGen = 0;
 async function route() {
   const gen = ++navGen;
   const h = location.hash || "#/";
-  sync.segments = []; sync.els = []; sync.activeIdx = -1; resetFollow();
+  sync.segments = []; sync.els = []; sync.activeIdx = -1; sync.visible = false; resetFollow();
   const render = (fn) => async (...a) => { const html = await fn(...a); return html; };
   try {
     if (h.startsWith("#/m/")) await meetingView(decodeURIComponent(h.slice(4).split("?")[0]), gen);
@@ -357,7 +488,7 @@ function cardHTML(s) {
   const d = dateParts(s.started_at);
   const aiNote = s.ai_status !== "done"
     ? `<span class="ai-badge ${s.ai_status}">${esc(aiBadgeText(s))}</span>` : "";
-  const snippet = (s.overview_md || "").replace(/[#*-]/g, "").slice(0, 220);
+  const snippet = summaryModel(s).brief;
   return `<a class="meeting-card" href="#/m/${encodeURIComponent(s.id)}">
     <div class="mc-date"><b>${d.day}</b>${d.year}<br>${d.time}</div>
     <div>
@@ -382,167 +513,197 @@ async function meetingView(id, gen) {
   const wantLang = localStorage.getItem("quill_lang") || "en";
   const s = await api(`/api/sessions/${encodeURIComponent(id)}?lang=${wantLang}`);
   if (stale(gen)) return;
-  const lang = s.lang; // server truth: "ru" only when translation is actually applied
+  const lang = s.lang;
   const d = dateParts(s.started_at);
+
   if (s.ai_status === "transcribing" || s.ai_status === "transcription_failed") {
     const failed = s.ai_status === "transcription_failed";
-    view.innerHTML = `
-      <div class="meet-head">
-        <a class="meet-back" href="#/">← Meetings</a>
+    view.innerHTML = `<div class="meeting-page">
+      <a class="meet-back" href="#/">← ${copy(lang, "Meetings", "Встречи")}</a>
+      <header class="meeting-header processing-header">
         <h1>${esc(s.title || s.id)}</h1>
-        <div class="meet-meta">
-          <span>${d.day} ${d.year}, ${d.time}</span><span class="sep">·</span>
-          <span>${fmtDur(s.duration_s)}</span><span class="sep">·</span>
-          <span class="ai-badge ${s.ai_status}">${esc(aiLabel(s))}</span>
-        </div>
-      </div>
-      <div class="panel local-pipeline">
-        <h2>${failed ? "Local transcription needs attention" : "Transcribing on your Mac…"}</h2>
+        <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span></div>
+      </header>
+      <div class="local-pipeline ${failed ? "failed" : ""}">
+        <span class="pipeline-orbit" aria-hidden="true"></span>
+        <div><div class="section-kicker">${failed ? copy(lang, "Needs attention", "Нужно проверить") : copy(lang, "Recording secured", "Запись сохранена")}</div>
+        <h2>${failed ? copy(lang, "Local transcription needs attention", "Локальная расшифровка требует внимания") : copy(lang, "Transcribing on your Mac…", "Расшифровывается на Mac…")}</h2>
         <p>${failed
-          ? esc(s.ai_error || "The local transcription process failed. Quill will preserve the recording for recovery.")
-          : "The recording is finalized and safe. The dashboard will fill in automatically when the local transcript arrives."}</p>
-      </div>`;
+          ? esc(s.ai_error || "The local transcription process failed. Quill preserved the recording for recovery.")
+          : copy(lang, "The recording is finalized and safe. This page will fill in automatically when the transcript arrives.", "Запись завершена и сохранена. Страница заполнится автоматически, когда будет готов транскрипт.")}</p></div>
+      </div></div>`;
     if (!failed) pollAI(s.id, s.ai_status);
     return;
   }
+
   const tracks = [s.has_audio_mixed && "mixed", s.has_audio_system && "system", s.has_audio_mic && "mic"].filter(Boolean);
-
-  // group segments into speaker turns
-  const turns = [];
-  for (const seg of s.segments) {
-    const last = turns[turns.length - 1];
-    if (last && last.speaker === seg.speaker && seg.start_ms - last.end < 4000) {
-      last.segs.push(seg); last.end = seg.end_ms;
-    } else turns.push({ speaker: seg.speaker, start: seg.start_ms, end: seg.end_ms, segs: [seg] });
-  }
+  const turns = groupTurns(s.segments);
   const durationMs = Math.max(s.duration_s * 1000, 1);
+  const query = new URLSearchParams(location.hash.split("?")[1] || "");
+  const tParam = query.get("t");
+  const requestedTab = query.get("tab");
+  const initialTab = tParam ? "transcript"
+    : ["summary", "transcript", "ask"].includes(requestedTab) ? requestedTab : "summary";
 
-  view.innerHTML = `
-  <div class="meet-head">
-    <a class="meet-back" href="#/">← Meetings</a>
-    <h1>${esc(s.title || s.id)}</h1>
-    <div class="meet-meta">
-      <span>${d.day} ${d.year}, ${d.time}</span><span class="sep">·</span>
-      <span>${fmtDur(s.duration_s)}</span><span class="sep">·</span>
-      ${(s.tags || []).map((t) => `<span class="chip tag">${esc(t)}</span>`).join(" ")}
-      <span style="flex:1"></span>
-      ${s.ai_status !== "done" ? `<span class="ai-badge ${s.ai_status}">${esc(aiLabel(s))}</span>` : ""}
-      <div class="lang-toggle" id="lang-toggle" title="Language of AI notes">
-        <button data-lang="en" class="${lang === "en" ? "active" : ""}">EN</button>
-        <button data-lang="ru" class="${lang === "ru" ? "active" : ""}">RU</button>
+  view.innerHTML = `<div class="meeting-page">
+    <a class="meet-back" href="#/">← ${copy(lang, "Meetings", "Встречи")}</a>
+    <header class="meeting-header">
+      <div class="meeting-title-row">
+        <div class="meeting-title-block">
+          <h1>${esc(s.title || s.id)}</h1>
+          <div class="meet-meta">
+            <span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span>
+            ${(s.tags || []).map((tag) => `<span class="chip tag">${esc(tag)}</span>`).join("")}
+            ${s.ai_status !== "done" ? `<span class="ai-badge ${s.ai_status}">${esc(aiLabel(s, lang))}</span>` : ""}
+          </div>
+        </div>
+        <div class="meeting-controls">
+          <div class="lang-toggle" id="lang-toggle" title="${copy(lang, "Language of AI notes", "Язык заметок")}">
+            <button data-lang="en" class="${lang === "en" ? "active" : ""}">EN</button>
+            <button data-lang="ru" class="${lang === "ru" ? "active" : ""}">RU</button>
+          </div>
+          <button class="btn primary" id="btn-share">${copy(lang, "Share", "Поделиться")}</button>
+          <div class="more-wrap">
+            <button class="icon-btn" id="btn-more" aria-label="${copy(lang, "More meeting actions", "Другие действия")}" aria-expanded="false">•••</button>
+            <div class="meeting-menu hidden" id="meeting-menu" role="menu">
+              <button id="btn-regen" role="menuitem">↻ ${copy(lang, "Regenerate summary", "Создать резюме заново")}</button>
+              <button class="hidden" id="btn-unshare" role="menuitem">${copy(lang, "Revoke share link", "Отозвать ссылку")}</button>
+              <button class="danger" id="btn-del" role="menuitem">${copy(lang, "Delete meeting", "Удалить встречу")}</button>
+            </div>
+          </div>
+        </div>
       </div>
-      <button class="btn" id="btn-share">${lang === "ru" ? "Поделиться" : "Share"}</button>
-      <button class="btn hidden" id="btn-unshare">Unshare</button>
-      <button class="btn" id="btn-regen">↻ Regenerate</button>
-      <button class="btn" id="btn-del" title="Delete this meeting everywhere on the server">Delete</button>
-    </div>
-  </div>
-  <div class="meet-grid">
-    <div>
-      <div class="panel chat-panel chat-hero">
-        <h2>${lang === "ru" ? "Спросить об этой встрече" : "Ask about this meeting"}</h2>
+    </header>
+    <nav class="meeting-tabs" role="tablist" aria-label="${copy(lang, "Meeting view", "Раздел встречи")}">
+      <button id="meeting-tab-summary" role="tab" aria-controls="meeting-summary" data-meeting-tab="summary">${copy(lang, "Summary", "Резюме")}</button>
+      <button id="meeting-tab-transcript" role="tab" aria-controls="meeting-transcript" data-meeting-tab="transcript">${copy(lang, "Transcript", "Транскрипт")}</button>
+      <button id="meeting-tab-ask" role="tab" aria-controls="meeting-ask" data-meeting-tab="ask">${copy(lang, "Ask", "Спросить")}</button>
+    </nav>
+    <section id="meeting-summary" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-summary" data-meeting-panel="summary">
+      <div class="summary-layout">${summaryDocumentHTML(s, lang)}${meetingRailHTML(s, lang)}</div>
+    </section>
+    <section id="meeting-transcript" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-transcript" data-meeting-panel="transcript">
+      ${transcriptPanelHTML(turns, lang)}
+    </section>
+    <section id="meeting-ask" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-ask" data-meeting-panel="ask">
+      <div class="ask-meeting">
+        <div class="ask-intro"><div class="ask-spark" aria-hidden="true">✦</div>
+          <div><div class="section-kicker">${copy(lang, "Grounded in this recording", "Ответы по этой записи")}</div>
+          <h2>${copy(lang, "Ask anything about the meeting", "Спросите что угодно о встрече")}</h2>
+          <p>${copy(lang, "Answers link back to the exact moments Quill used.", "Ответы опираются на точные моменты из разговора.")}</p></div>
+        </div>
         <div class="chat-log" id="chat-log"></div>
         <div class="chat-suggest" id="chat-suggest">
           ${(lang === "ru"
             ? ["Что решили?", "Какие следующие шаги?", "О чём договорились по деньгам?"]
             : ["What was decided?", "What are the next steps?", "What did we agree on?"])
-            .map((t) => `<button class="suggest-chip">${t}</button>`).join("")}
+            .map((text) => `<button class="suggest-chip">${text}</button>`).join("")}
         </div>
-        <form class="chat-form" id="chat-form">
-          <input id="chat-input" placeholder="${lang === "ru" ? "Спросите что угодно о разговоре…" : "Ask anything about this call…"}" autocomplete="off">
-          <button class="send-btn" title="Ask">↑</button>
+        <form class="chat-form ask-compose" id="chat-form">
+          <input id="chat-input" placeholder="${copy(lang, "Ask about a decision, quote, or detail…", "Спросите о решении, цитате или детали…")}" autocomplete="off">
+          <button class="send-btn" title="${copy(lang, "Ask", "Спросить")}">↑</button>
         </form>
       </div>
-      <div class="panel" id="p-actions"><h2>${lang === "ru" ? "Задачи" : "Action items"}</h2>${actionsHTML(s.actions)}</div>
-      <div class="panel"><h2>${lang === "ru" ? "Обзор" : "Overview"}</h2>
-        <div class="overview">${s.overview_md ? md(s.overview_md) : `<p style="color:var(--paper-dim)">${esc(aiLabel(s))}</p>`}</div>
-        ${(s.keywords || []).length ? `<div class="kw-row">${s.keywords.map((k) => `<span class="chip">${esc(k)}</span>`).join("")}</div>` : ""}
-      </div>
-      ${(s.outline || []).length ? `<div class="panel"><h2>${lang === "ru" ? "Главы" : "Chapters"}</h2>
-        ${s.outline.map((o) => `<div class="outline-item" data-ms="${o.ms}">
-          <span class="ts">${fmt(o.ms)}</span><span>${esc(o.label)}</span></div>`).join("")}
-      </div>` : ""}
-    </div>
-    <div class="transcript-panel">
-      <div class="tr-toolbar">
-        <h2>Transcript</h2>
-        <div class="tr-search">
-          <input id="tr-q" placeholder="Find in transcript" autocomplete="off">
-          <span class="cnt" id="tr-cnt"></span>
-          <button id="tr-prev" title="Previous (Shift+Enter)">↑</button>
-          <button id="tr-next" title="Next (Enter)">↓</button>
-        </div>
-      </div>
-      <div class="tr-body">
-        <div class="time-rail" id="rail">
-          <div class="rail-line"></div>
-          <div class="rail-needle" id="rail-needle" style="top:0"></div>
-        </div>
-        <div class="turns" id="turns">
-          ${turns.map((t) => `
-            <div class="turn ${t.speaker}">
-              <div class="turn-gutter">
-                <span class="turn-speaker">${t.speaker === "me" ? "Me" : "Them"}</span>
-                <span class="turn-ts" data-ms="${t.start}">${fmt(t.start)}</span>
-              </div>
-              <div class="turn-text">
-                ${t.segs.map((g) => `<span class="seg" data-ms="${g.start_ms}" data-idx="${g.idx}">${esc(g.text)}</span>`).join(" ")}
-              </div>
-            </div>`).join("")}
-        </div>
-      </div>
-    </div>
+    </section>
   </div>`;
 
-  // player + sync wiring
+  const page = $(".meeting-page");
+  const rail = $("#rail");
+  let railBuilt = false;
+  const layoutRail = () => requestAnimationFrame(() => {
+    if (!rail || rail.clientHeight <= 0) return;
+    sync.railHeight = rail.clientHeight;
+    if (railBuilt) return;
+    railBuilt = true;
+    const minutes = Math.floor(durationMs / 60000);
+    for (let minute = 1; minute <= minutes; minute++) {
+      const tick = document.createElement("div");
+      tick.className = "rail-tick";
+      tick.style.top = `${(minute * 60000 / durationMs) * sync.railHeight}px`;
+      rail.appendChild(tick);
+    }
+    for (const chapterData of s.outline || []) {
+      const chapter = document.createElement("button");
+      chapter.className = "rail-chapter";
+      chapter.title = chapterData.label;
+      chapter.style.top = `${(chapterData.ms / durationMs) * sync.railHeight}px`;
+      chapter.dataset.jumpMs = chapterData.ms;
+      rail.appendChild(chapter);
+    }
+  });
+
+  const setTab = (name, updateUrl = true) => {
+    page.querySelectorAll("[data-meeting-tab]").forEach((button) => {
+      const active = button.dataset.meetingTab === name;
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    page.querySelectorAll("[data-meeting-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.meetingPanel !== name;
+    });
+    sync.visible = name === "transcript";
+    if (sync.visible) layoutRail();
+    if (updateUrl) {
+      const params = new URLSearchParams(location.hash.split("?")[1] || "");
+      params.set("tab", name);
+      if (name !== "transcript") params.delete("t");
+      history.replaceState(null, "", `#/m/${encodeURIComponent(s.id)}?${params}`);
+    }
+  };
+
+  page.querySelectorAll("[data-meeting-tab]").forEach((button) => {
+    button.addEventListener("click", () => setTab(button.dataset.meetingTab));
+  });
+  $(".meeting-tabs").addEventListener("keydown", (e) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(e.key)) return;
+    const tabs = [...page.querySelectorAll("[data-meeting-tab]")];
+    const current = tabs.indexOf(document.activeElement);
+    const next = tabs[(current + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    e.preventDefault(); next.focus(); next.click();
+  });
+
   if (tracks.length) player.load(s.id, tracks);
   else player.unload();
   sync.segments = s.segments;
-  sync.els = [...view.querySelectorAll(".seg")].sort((a, b) => a.dataset.idx - b.dataset.idx);
+  sync.els = [...page.querySelectorAll(".seg")].sort((a, b) => a.dataset.idx - b.dataset.idx);
   sync.durationMs = durationMs;
   sync.railNeedle = $("#rail-needle");
 
-  const rail = $("#rail");
-  requestAnimationFrame(() => {
-    sync.railHeight = rail.clientHeight;
-    // minute ticks + chapter dots
-    const minutes = Math.floor(durationMs / 60000);
-    for (let m = 1; m <= minutes; m++) {
-      const t = document.createElement("div");
-      t.className = "rail-tick";
-      t.style.top = `${(m * 60000 / durationMs) * sync.railHeight}px`;
-      rail.appendChild(t);
-    }
-    for (const o of s.outline || []) {
-      const c = document.createElement("div");
-      c.className = "rail-chapter";
-      c.title = o.label;
-      c.style.top = `${(o.ms / durationMs) * sync.railHeight}px`;
-      c.dataset.ms = o.ms;
-      rail.appendChild(c);
-    }
-  });
-  rail.addEventListener("click", (e) => {
-    const ms = e.target.dataset.ms
-      ? +e.target.dataset.ms
-      : ((e.clientY - rail.getBoundingClientRect().top) / sync.railHeight) * durationMs;
+  rail?.addEventListener("click", (e) => {
+    const chapter = e.target.closest("[data-jump-ms]");
+    const ms = chapter ? +chapter.dataset.jumpMs
+      : ((e.clientY - rail.getBoundingClientRect().top) / Math.max(sync.railHeight, 1)) * durationMs;
     player.seek(ms, true); resetFollow(); tickOnce();
   });
-
-  view.addEventListener("click", (e) => {
-    const el = e.target.closest("[data-ms]");
-    if (el && !el.classList.contains("rail-chapter")) {
-      player.seek(+el.dataset.ms); resetFollow(); tickOnce();
+  page.addEventListener("click", (e) => {
+    const openTab = e.target.closest("[data-open-tab]");
+    if (openTab) {
+      setTab(openTab.dataset.openTab);
+      if (openTab.dataset.openTab === "ask") setTimeout(() => $("#chat-input")?.focus(), 50);
+      return;
+    }
+    const jump = e.target.closest("[data-jump-ms]");
+    const moment = jump || e.target.closest("[data-ms]");
+    if (moment && !moment.classList.contains("rail-chapter")) {
+      const ms = +(jump?.dataset.jumpMs ?? moment.dataset.ms);
+      if (jump) setTab("transcript");
+      player.seek(ms); resetFollow(); tickOnce();
+      if (jump) setTimeout(() => sync.els[findSegment(ms)]?.scrollIntoView({ block: "center" }), 60);
+    }
+    if (!e.target.closest(".more-wrap")) {
+      $("#meeting-menu")?.classList.add("hidden");
+      $("#btn-more")?.setAttribute("aria-expanded", "false");
     }
   });
 
-  // deep-link seek (#/m/{id}?t=ms)
-  const tParam = new URLSearchParams(location.hash.split("?")[1] || "").get("t");
-  if (tParam) setTimeout(() => { player.seek(+tParam, false); tickOnce();
-    sync.els[findSegment(+tParam)]?.scrollIntoView({ block: "center" }); }, 300);
+  setTab(initialTab, false);
+  if (tParam) setTimeout(() => {
+    const ms = +tParam;
+    player.seek(ms, false); tickOnce();
+    sync.els[findSegment(ms)]?.scrollIntoView({ block: "center" });
+  }, 300);
 
-  // actions
-  $("#p-actions").addEventListener("change", async (e) => {
+  $("#p-actions")?.addEventListener("change", async (e) => {
     const cb = e.target.closest("input[data-action-id]");
     if (!cb) return;
     cb.disabled = true;
@@ -556,24 +717,40 @@ async function meetingView(id, gen) {
     cb.disabled = false;
   });
 
+  const moreButton = $("#btn-more"), meetingMenu = $("#meeting-menu");
+  moreButton.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !meetingMenu.classList.contains("hidden");
+    meetingMenu.classList.toggle("hidden", open);
+    moreButton.setAttribute("aria-expanded", String(!open));
+  });
+  meetingMenu.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      meetingMenu.classList.add("hidden");
+      moreButton.setAttribute("aria-expanded", "false");
+      moreButton.focus();
+    }
+  });
+
   api(`/api/sessions/${encodeURIComponent(s.id)}/share`).then(({ token }) => {
     if (token) $("#btn-unshare").classList.remove("hidden");
   });
   $("#btn-share").addEventListener("click", async () => {
+    const button = $("#btn-share");
     const { url } = await post(`/api/sessions/${encodeURIComponent(s.id)}/share?lang=${lang}`);
-    $("#btn-unshare").classList.remove("hidden");  // token is live regardless of clipboard
+    $("#btn-unshare").classList.remove("hidden");
     try {
       await navigator.clipboard.writeText(url);
-      $("#btn-share").textContent = lang === "ru" ? "Ссылка скопирована ✓" : "Link copied ✓";
-      setTimeout(() => { $("#btn-share").textContent = lang === "ru" ? "Поделиться" : "Share"; }, 2500);
+      button.textContent = copy(lang, "Copied ✓", "Скопировано ✓");
+      setTimeout(() => { button.textContent = copy(lang, "Share", "Поделиться"); }, 2500);
     } catch {
-      prompt(lang === "ru" ? "Скопируйте ссылку:" : "Copy the link:", url);
+      prompt(copy(lang, "Copy the link:", "Скопируйте ссылку:"), url);
     }
   });
   $("#btn-unshare").addEventListener("click", async () => {
     await api(`/api/sessions/${encodeURIComponent(s.id)}/share`, { method: "DELETE" });
     $("#btn-unshare").classList.add("hidden");
-    alert(lang === "ru" ? "Ссылка отозвана — больше не работает." : "Link revoked — it no longer works.");
+    meetingMenu.classList.add("hidden");
   });
   $("#btn-del").addEventListener("click", async () => {
     if (!confirm(`Delete "${s.title || s.id}" from the dashboard? The original stays on the Mac.`)) return;
@@ -581,20 +758,19 @@ async function meetingView(id, gen) {
     location.hash = "#/";
   });
 
-  // language toggle — server truth for state; auto-translate when needed
-  const runTranslate = async (btn) => {
-    const orig = btn.textContent;
-    btn.textContent = "…";
+  const runTranslate = async (button) => {
+    const original = button.textContent;
+    button.textContent = "…";
     $("#lang-toggle").style.pointerEvents = "none";
     try {
-      const r = await post(`/api/sessions/${encodeURIComponent(s.id)}/translate?lang=ru`);
-      if (r.job_id) {
+      const result = await post(`/api/sessions/${encodeURIComponent(s.id)}/translate?lang=ru`);
+      if (result.job_id) {
         let done = false;
-        for (let i = 0; i < 200; i++) {
-          await new Promise((res) => setTimeout(res, 2000));
-          const jb = await api(`/api/jobs/${r.job_id}`);
-          if (jb.status === "done") { done = true; break; }
-          if (jb.status === "failed") throw new Error(jb.error || "translation failed");
+        for (let attempt = 0; attempt < 200; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const job = await api(`/api/jobs/${result.job_id}`);
+          if (job.status === "done") { done = true; break; }
+          if (job.status === "failed") throw new Error(job.error || "translation failed");
         }
         if (!done) throw new Error("translation timed out — try again");
       }
@@ -604,42 +780,34 @@ async function meetingView(id, gen) {
       localStorage.setItem("quill_lang", "en");
       return false;
     } finally {
-      btn.textContent = orig;
-      const lt = $("#lang-toggle");
-      if (lt) lt.style.pointerEvents = "";
+      button.textContent = original;
+      const toggle = $("#lang-toggle");
+      if (toggle) toggle.style.pointerEvents = "";
     }
   };
   const rerenderIfHere = () => {
     if (location.hash.includes(encodeURIComponent(s.id))) meetingView(s.id);
   };
   $("#lang-toggle").addEventListener("click", async (e) => {
-    const b = e.target.closest("[data-lang]");
-    if (!b) return;
-    const want = b.dataset.lang;
+    const button = e.target.closest("[data-lang]");
+    if (!button) return;
+    const want = button.dataset.lang;
     localStorage.setItem("quill_lang", want);
     if (want === "ru" && !s.lang_ready.ru) {
-      if (await runTranslate(b)) rerenderIfHere();
+      if (await runTranslate(button)) rerenderIfHere();
       return;
     }
     if (want !== lang) rerenderIfHere();
   });
-  // Sticky RU preference: meeting not translated yet — start it now, silently.
   if (wantLang === "ru" && !s.lang_ready.ru && s.ai_status === "done") {
-    const ruBtn = $('#lang-toggle [data-lang="ru"]');
-    runTranslate(ruBtn).then((ok) => { if (ok) rerenderIfHere(); });
+    const ruButton = $('#lang-toggle [data-lang="ru"]');
+    runTranslate(ruButton).then((ok) => { if (ok) rerenderIfHere(); });
   }
 
-  $("#chat-suggest")?.addEventListener("click", (e) => {
-    const chip = e.target.closest(".suggest-chip");
-    if (!chip) return;
-    $("#chat-input").value = chip.textContent;
-    $("#chat-form").requestSubmit();
-  });
-
-  // regenerate
   $("#btn-regen").addEventListener("click", async () => {
     await post(`/api/sessions/${encodeURIComponent(s.id)}/regenerate`);
-    $("#btn-regen").textContent = "AI working…";
+    $("#btn-regen").textContent = copy(lang, "AI is rebuilding the summary…", "ИИ пересобирает резюме…");
+    meetingMenu.classList.add("hidden");
     pollAI(s.id, "pending");
   });
   if (s.ai_status === "pending" || s.ai_status === "running"
@@ -647,39 +815,44 @@ async function meetingView(id, gen) {
     pollAI(s.id, s.ai_status);
   }
 
-  // in-transcript search
   wireTranscriptSearch();
 
-  // chat
+  $("#chat-suggest")?.addEventListener("click", (e) => {
+    const chip = e.target.closest(".suggest-chip");
+    if (!chip) return;
+    $("#chat-input").value = chip.textContent;
+    $("#chat-form").requestSubmit();
+  });
   const log = $("#chat-log");
   api(`/api/chat/session?session_id=${encodeURIComponent(s.id)}`).then(({ messages }) => {
-    for (const m of messages) addMsg(log, m.role, m.content);
+    for (const message of messages) addMsg(log, message.role, message.content);
     if (messages.length) $("#chat-suggest")?.classList.add("hidden");
   });
   $("#chat-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const input = $("#chat-input"), btn = e.target.querySelector("button");
-    const q = input.value.trim();
-    if (!q || btn.disabled) return;
-    input.value = ""; btn.disabled = true;
-    addMsg(log, "user", q);
-    const think = addMsg(log, "assistant thinking", "thinking…");
+    const input = $("#chat-input"), button = e.target.querySelector("button");
+    const question = input.value.trim();
+    if (!question || button.disabled) return;
+    input.value = ""; button.disabled = true;
+    $("#chat-suggest")?.classList.add("hidden");
+    addMsg(log, "user", question);
+    const thinking = addMsg(log, "assistant thinking", copy(lang, "reading the meeting…", "читаю встречу…"));
     try {
-      const { answer } = await postJob(`/api/sessions/${encodeURIComponent(s.id)}/chat`, { question: q });
-      think.remove(); addMsg(log, "assistant", answer);
-    } catch (err) { think.textContent = "Failed: " + err.message; }
-    btn.disabled = false;
+      const { answer } = await postJob(`/api/sessions/${encodeURIComponent(s.id)}/chat`, { question });
+      thinking.remove(); addMsg(log, "assistant", answer);
+    } catch (err) { thinking.textContent = "Failed: " + err.message; }
+    button.disabled = false;
   });
 }
 
-function aiLabel(s) {
-  return s.ai_status === "transcribing" ? "Transcribing on Mac…"
-    : s.ai_status === "transcription_failed" ? "Local transcription failed"
+function aiLabel(s, lang = "en") {
+  return s.ai_status === "transcribing" ? copy(lang, "Transcribing on Mac…", "Расшифровывается на Mac…")
+    : s.ai_status === "transcription_failed" ? copy(lang, "Local transcription failed", "Локальная расшифровка не удалась")
     : s.ai_status === "failed" && s.ai_retry_at
-    ? `AI paused: ${s.ai_error || "temporary failure"} — automatic retry scheduled`
-    : s.ai_status === "failed" ? `AI failed: ${s.ai_error || "unknown"} — hit Regenerate`
-    : s.ai_status === "running" ? "AI is reading the meeting…"
-    : s.ai_status === "pending" ? "AI queued…" : "";
+    ? copy(lang, `AI paused: ${s.ai_error || "temporary failure"} — automatic retry scheduled`, `ИИ приостановлен: ${s.ai_error || "временная ошибка"} — повтор запланирован`)
+    : s.ai_status === "failed" ? copy(lang, `AI failed: ${s.ai_error || "unknown"} — regenerate to retry`, `ИИ не справился: ${s.ai_error || "неизвестно"} — создайте резюме заново`)
+    : s.ai_status === "running" ? copy(lang, "AI is reading the meeting…", "ИИ читает встречу…")
+    : s.ai_status === "pending" ? copy(lang, "AI summary queued…", "Резюме поставлено в очередь…") : "";
 }
 
 function aiBadgeText(s) {
@@ -690,16 +863,18 @@ function aiBadgeText(s) {
     : "AI working…";
 }
 
-function actionsHTML(actions) {
-  if (!actions?.length) return `<p style="color:var(--paper-dim);font-size:13.5px">None found.</p>`;
+function actionsHTML(actions, { readonly = false, lang = "en" } = {}) {
+  if (!actions?.length) return `<p class="rail-empty">${copy(lang, "Nothing assigned.", "Задач нет.")}</p>`;
   return actions.map((a) => `
-    <label class="action-item ${a.done ? "done" : ""}">
-      <input type="checkbox" data-action-id="${a.id}" ${a.done ? "checked" : ""}>
+    <div class="action-item ${a.done ? "done" : ""}">
+      <input type="checkbox" aria-label="${esc(copy(lang, "Mark complete", "Отметить выполненной"))}: ${esc(a.text)}" ${readonly ? "disabled" : `data-action-id="${a.id}"`} ${a.done ? "checked" : ""}>
       <span class="at">${esc(a.text)}
         ${a.assignee ? `<span class="assignee">@${esc(a.assignee)}</span>` : ""}
-        ${a.source_ms != null ? `<span class="src" data-ms="${a.source_ms}">${fmt(a.source_ms)}</span>` : ""}
+        ${a.source_ms != null ? (a.session_id
+          ? `<a class="src" href="#/m/${encodeURIComponent(a.session_id)}?t=${a.source_ms}">${fmt(a.source_ms)}</a>`
+          : `<button type="button" class="src" data-jump-ms="${a.source_ms}">${fmt(a.source_ms)}</button>`) : ""}
       </span>
-    </label>`).join("");
+    </div>`).join("");
 }
 
 async function pollAI(id, initialStatus) {

@@ -1,82 +1,175 @@
-# Quill sleep/wake visibility and delivery plan
+# Quill summary-first dashboard redesign
 
 ## Objective
 
-Make a lid-closed meeting visible on the dashboard as soon as capture is safely
-finalized, keep its local transcription state accurate, and guarantee eventual
-upload even if Quill exits in the narrow window between writing the transcript
-and launching the completion hook.
+Make a finished meeting useful before anyone opens the transcript. The default
+meeting view must answer: what happened, what was decided, what needs doing,
+and what remains unresolved. The transcript remains exact, searchable, and
+audio-synced, but moves behind a deliberate secondary tab. English/Russian
+translation, local-processing visibility, sharing, Ask, audio, and recovery
+must keep working.
 
-## Current incident
+## Research findings
 
-Session `2026.08.29-1415` started at `2026-08-29T07:15:35Z` and finalized at
-`09:16:19Z` with 7,244 seconds of capture. macOS entered clamshell sleep five
-seconds later and woke five minutes afterward. Whisper resumed on wake and a
-live process sample confirmed active Metal decoding, so the recording is not
-lost or wedged. It is absent from the dashboard only because Quill currently
-waits for the complete local transcript before invoking sync.
+- Quill currently renders a `5fr / 7fr` split. Even though the latest real
+  meeting has substantial topic notes, the transcript is physically the
+  largest object and the notes have no short executive brief or explicit
+  decision/open-question model.
+- Wispr Flow Notetaker's current meeting screen makes **Summary** the default
+  tab beside **Transcript**, starts with one concise outcome paragraph, then
+  organizes the meeting by topic and next steps. Ask remains immediately
+  available without turning the transcript into the home screen.
+- The durable pattern to copy is the information hierarchy, not Wispr's brand:
+  title and controls -> mode tabs -> readable result -> source transcript.
+- Existing Quill data is valuable and must degrade gracefully. Older meetings
+  have `overview_md` but no new structured summary fields; the UI will derive a
+  useful lead from localized overview text until that meeting is regenerated.
 
-## Design
+References:
 
-1. Persist an atomic `transcription.json` state beside each recording. Quill
-   records queued, transcribing, ready, and failed transitions so a restart,
-   uploader, or dashboard never has to infer pipeline state from a process.
-2. Invoke the idempotent sync hook when a completed capture enters the queue,
-   on meaningful transcription-state changes, and after the transcript is
-   ready. Restart recovery republishes unfinished work.
-3. Extend `quill-sync` with a metadata-only announcement phase. It uploads only
-   `meta.json`, `transcription.json`, and the diagnostic log before a transcript
-   exists; raw CAF audio remains local. State-hash markers keep scans cheap.
-4. Let dashboard ingest create a placeholder from authoritative recorder
-   metadata, with explicit local-transcribing/local-failed states. Arrival of
-   `transcript.json` atomically promotes that row into the existing AI queue.
-5. Show the local state in the meeting library and meeting page, and poll until
-   the transcript arrives. Do not expose chat, regeneration, or sharing against
-   an empty transcript.
-6. Install a dedicated `com.digimata.quill-sync` LaunchAgent. `RunAtLoad` plus
-   five-minute `StartCalendarInterval` entries provide a durable outbox sweep;
-   launchd coalesces missed calendar events and runs once on wake. The existing
-   PID-owned uploader lock makes hook and scheduled invocations safe together.
-7. Mark the recorder's long-running decode as user-initiated work that still
-   permits system sleep, while disabling sudden/automatic termination for the
-   duration of the queue drain.
-8. Retry any failed local session once behind newer work and refuse to publish
-   an empty transcript. The durable failed state remains visible if retry also
-   fails.
+- <https://wisprflow.ai/notetaker>
+- <https://wisprflow.ai/post/wispr-flow-notetaker>
+
+## Product structure
+
+### Application shell
+
+Use a compact left workspace rail on desktop and a compact top shell on narrow
+screens. The rail contains Quill, Meetings, Action items, Ask, and global
+search. It is navigation, not decoration, and leaves the meeting document with
+a stable reading width.
+
+### Library
+
+Keep the chronological library, but make cards lead with the generated brief
+when present and a clean localized overview fallback otherwise. Processing and
+failure states remain visible in-place. Tags and open-action counts remain
+secondary metadata.
+
+### Meeting detail
+
+The finished-meeting information architecture is:
+
+```text
+┌ workspace rail ┐  ← Meetings                         EN | RU   Share   •••
+│ Meetings       │  Meeting title
+│ Action items   │  date · time · duration · tags
+│ Ask            │
+│                │  Summary     Transcript     Ask
+│ Search…        │  ─────────────────────────────────────────────────────
+└────────────────┘  ┌ readable summary document ┐  ┌ meeting rail      ┐
+                    │ At a glance                │  │ Action items      │
+                    │ concise outcome paragraph │  │ Timeline          │
+                    │                            │  │ Keywords          │
+                    │ Decisions                  │  └───────────────────┘
+                    │ Topic notes                │
+                    │ Open questions             │
+                    └────────────────────────────┘
+```
+
+- **Summary** is always the default unless a deep link targets a transcript
+  moment.
+- **Transcript** owns the full reading width and preserves search, speaker
+  turns, time rail, click-to-seek, follow mode, and audio playback.
+- **Ask** owns a focused conversation view with the existing suggestions and
+  history. A compact prompt at the end of Summary switches into this view.
+- Timestamp links in decisions, actions, and the timeline switch to Transcript
+  and seek to the source moment.
+- Share pages use the same Summary/Transcript hierarchy without private
+  controls or Ask.
+
+## Visual system
+
+Subject: a private operator's working notebook. Audience: Max, revisiting long
+calls to act quickly. Single job: turn a recording into a trusted working
+brief.
+
+### Tokens
+
+- `canvas` `#F1F3EF` — cool desk surface, not warm editorial cream
+- `paper` `#FFFFFF` — the meeting document
+- `ink` `#20231F` — primary text
+- `muted` `#6F756F` — metadata and quiet controls
+- `line` `#DDE1DA` — structure
+- `quill` `#5B57D9` / `quill-soft` `#EFEEFF` — ink accent and focus
+- `source` `#2F758A` — timestamps and playback provenance
+- `warning` `#B86A35` / `danger` `#B84B52` — pipeline/error states only
+
+Typography uses Charter/Iowan Old Style for meeting titles and lead prose,
+the system sans stack for controls and notes, and SF Mono for time. The serif
+is restrained to material that reads like a document.
+
+Signature: a slim violet margin rule beside the executive brief and active
+meeting tab, echoing an annotated page. This is the one expressive device;
+the rest stays quiet and precise.
+
+### Design critique before build
+
+An initial warm parchment/serif concept was too close to the common editorial
+AI-dashboard look and to Wispr's marketing palette. The revised system keeps
+Wispr's proven hierarchy but uses a cool mineral canvas, white working paper,
+and violet/source-blue ink so it reads as Quill rather than a clone. Cards do
+not float everywhere: borders and spacing carry most of the structure.
+
+## Data and AI contract
+
+Add a nullable `summary_json` to `sessions` and `artifacts_lang`, plus an
+integer `artifacts_revision` on `sessions`:
+
+```json
+{
+  "brief": "Two direct sentences describing the outcome and why it matters.",
+  "decisions": [{"text": "A real decision", "source_ms": 123000}],
+  "open_questions": [{"text": "An unresolved issue", "source_ms": 456000}]
+}
+```
+
+Keep `overview_md` as the detailed topic-organized notes and compatibility
+surface. Generation will explicitly separate observations from decisions,
+limit topic density, retain exact names/numbers, and avoid invented actions.
+Translation returns the same structure and must preserve every timestamp.
+Each successful regeneration increments `artifacts_revision`; translation jobs
+capture that revision and discard their result if the English notes changed
+while they were running. This also protects meetings with no action items,
+where action-ID comparison alone cannot detect a regeneration race.
+
+Migration is additive and idempotent. Existing meetings return an empty
+structured summary and render a localized fallback from `overview_md`.
+Regenerating a meeting upgrades it to the new summary contract without changing
+the transcript or completed manual actions.
 
 ## Files
 
-- `recorder/Sources/QuillSession/SessionManifest.swift`
-- `recorder/Sources/quill/Transcription/TranscriptionCoordinator.swift`
-- `recorder/Tests/QuillSessionTests/SessionManifestTests.swift`
-- `dashboard/mac/quill-sync`
-- `dashboard/mac/test-quill-sync.zsh`
-- `dashboard/app/db.py`
-- `dashboard/app/ingest.py`
-- `dashboard/app/main.py`
-- `dashboard/static/app.js`
-- `dashboard/static/style.css`
-- `dashboard/test_reliability.py`
-- `install/link.sh`, `install/sync_agent.py`, `install/test_sync_agent.py`
-- `README.md`, `SETUP.md`, `AGENTS.md`, `status.md`
+- `dashboard/static/index.html` — application shell and accessible landmarks
+- `dashboard/static/app.js` — summary model fallback, tabs, new meeting/share
+  composition, deep-link behavior, and control menu
+- `dashboard/static/style.css` — complete responsive visual system
+- `dashboard/app/ai.py` — structured brief/decisions/open-questions contract
+- `dashboard/app/db.py` — additive columns and serialization
+- `dashboard/app/main.py` — localized summary payloads and strict share DTO
+- `dashboard/test_reliability.py` — migration, persistence, localization, and
+  backward-compatibility coverage where possible without live AI calls
+- `README.md`, `AGENTS.md`, `status.md` — product behavior and shipped state
 
-## Verification and deployment
+## Verification and rollout
 
-1. Test manifest transitions, metadata-only ingest and promotion, uploader
-   announcement/idempotence, and LaunchAgent plist generation.
-2. Run debug and release Swift suites, dashboard tests, uploader regressions,
-   JavaScript syntax checks, and shell syntax checks.
-3. Deploy server support first, then install the new uploader and scheduled
-   agent on the Mac. Do not restart Quill while the live Whisper child is
-   decoding; install the new recorder only after this session finishes.
-4. Verify the current session appears, promotes to a complete transcript,
-   receives AI notes, exposes all audio tracks, and matches Mac/server hashes.
-5. Force a sync-agent run and a recorder restart, confirm both return cleanly,
-   then verify Mac/server worktrees and service health.
+1. Run Python reliability tests and add storage round-trip coverage for both
+   new and legacy artifact shapes.
+2. Run JavaScript syntax checks and targeted static assertions for tab and
+   accessibility contracts.
+3. Start an isolated password-free preview against a SQLite backup of real
+   Quill data; visually test desktop, narrow desktop, and mobile.
+4. Verify Summary is default, timestamp deep links open Transcript, EN/RU
+   localized fallback is never mixed, Ask works, actions toggle, and audio
+   controls still bind.
+5. Deploy the dashboard, verify health and authenticated API behavior, then
+   regenerate the latest real meeting so its summary uses the richer contract.
+6. Recheck the live meeting in-browser and verify no console errors, service
+   failures, or database integrity issues.
 
 ## Rollback
 
-All new files are additive and session inputs remain immutable. The dashboard
-accepts legacy sessions without `transcription.json`; removing the sync agent
-returns delivery to the existing completion hook. The previous app executable
-is retained before deployment so recorder rollback never touches recordings.
+The database change is additive. Old server code ignores `summary_json`, and
+the old UI still consumes `overview_md`; reverting the static/backend code does
+not require removing columns or regenerating transcripts. Deploy keeps the
+recording/session filesystem untouched.

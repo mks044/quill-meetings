@@ -1,9 +1,9 @@
 # quill-meetings
 
 Your own meeting recorder and dashboard. Record a call on your Mac; minutes
-later it's on your own server as searchable notes — transcript with synced
-audio, AI summary, action items, chapters, and a chat you can ask about any
-meeting.
+later it's on your own server as a summary-first working brief — key outcome,
+decisions, open questions, action items, searchable transcript with synced
+audio, chapters, and a chat you can ask about any meeting.
 
 **No SaaS. No per-token API bills. Your audio never touches a third party.**
 Transcription runs on your Mac (Whisper, on-device). The AI notes run through
@@ -28,10 +28,12 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
 
 ## What you get
 
-- **Transcript** — speaker-separated turns, click a line to hear that moment,
-  highlight follows the audio, search inside the transcript.
-- **AI notes** — title, topic-sectioned overview, chapters, keywords, tags, and
-  action items with owners and timestamps. Generated on arrival.
+- **Summary first** — every meeting opens on a concise outcome, explicit
+  decisions, topic-organized notes, open questions, and source-linked actions.
+- **Transcript on demand** — a secondary tab with speaker-separated turns;
+  click a line to hear that moment, follow the audio, or search every word.
+- **AI notes** — title, readable brief, chapters, keywords, tags, and action
+  items with owners and timestamps. Generated on arrival.
 - **Action items** — checkable, aggregated across every meeting on one page.
 - **Ask** — chat about one meeting, or across the whole archive.
 - **Search** — full-text over every word ever spoken, jumping to the moment.

@@ -8,22 +8,24 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><text y='19' font-size='19'>🪶</text></svg>">
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="#/">
-    <svg class="brand-feather" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.67 19a2 2 0 0 0 1.416-.588l6.154-6.172a6 6 0 0 0-8.49-8.49L5.586 9.914A2 2 0 0 0 5 11.328V18a1 1 0 0 0 1 1z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/></svg>
+<header class="app-nav">
+  <a class="brand" href="#/" aria-label="Quill">
+    <span class="brand-mark"><svg class="brand-feather" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.67 19a2 2 0 0 0 1.416-.588l6.154-6.172a6 6 0 0 0-8.49-8.49L5.586 9.914A2 2 0 0 0 5 11.328V18a1 1 0 0 0 1 1z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/></svg></span>
     <span>Quill</span>
   </a>
-  <nav class="topnav">
-    <a href="#/" data-nav="library">Meetings</a>
-    <a href="#/actions" data-nav="actions">Action items</a>
-    <a href="#/ask" data-nav="ask">Ask</a>
+  <nav class="topnav" aria-label="Workspace">
+    <a href="#/" data-nav="library" aria-label="Meetings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 5.5v16M8 7h8M8 11h6"/></svg><span>Meetings</span></a>
+    <a href="#/actions" data-nav="actions" aria-label="Action items"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 2.3 2.3L16 8.5"/></svg><span>Action items</span></a>
+    <a href="#/ask" data-nav="ask" aria-label="Ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-8 7.5 8.8 8.8 0 0 1-3.7-.8L4 20l1.4-4A7.5 7.5 0 1 1 20 11.5Z"/><path d="M9 11h.01M12 11h.01M15 11h.01"/></svg><span>Ask</span></a>
   </nav>
-  <div class="top-search">
+  <label class="top-search" aria-label="Search all meetings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
     <input id="global-search" type="search" placeholder="Search every word spoken…" autocomplete="off">
-  </div>
+  </label>
+  <div class="privacy-mark"><span></span>Private workspace</div>
 </header>
 
-<main id="view"></main>
+<div class="app-content"><main id="view" tabindex="-1"></main></div>
 
 <div id="player-bar" class="player-bar hidden">
   <button id="pb-play" class="pb-btn" title="Play/pause (Space)">▶</button>

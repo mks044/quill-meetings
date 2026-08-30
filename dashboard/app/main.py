@@ -75,14 +75,15 @@ def _throttled(ip: str) -> bool:
 
 LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Quill</title>
-<style>body{background:#0d1117;color:#e8e4da;font-family:-apple-system,sans-serif;
+<style>*{box-sizing:border-box}body{background:#f1f3ef;color:#20231f;font-family:-apple-system,sans-serif;
 display:grid;place-items:center;min-height:100vh;margin:0}
-form{display:flex;flex-direction:column;gap:14px;width:min(320px,88vw);text-align:center}
-h1{font-family:'Iowan Old Style',Georgia,serif;font-weight:500}
-input{padding:11px 14px;border-radius:9px;border:1px solid #263041;background:#141a23;
-color:#e8e4da;font-size:16px;outline:none;text-align:center}
-button{padding:11px;border-radius:9px;border:none;background:#e8e4da;color:#0d1117;
-font-size:15px;cursor:pointer}.err{color:#e5484d;font-size:13px;min-height:18px}</style>
+form{display:flex;flex-direction:column;gap:14px;width:min(340px,88vw);padding:34px;
+background:#fff;border:1px solid #dde1da;border-radius:16px;text-align:center;box-shadow:0 14px 45px #323b2d12}
+h1{font-family:Charter,'Iowan Old Style',Georgia,serif;font-size:30px;margin:0 0 4px}
+input{padding:12px 14px;border-radius:9px;border:1px solid #cbd0c7;background:#f7f8f5;
+color:#20231f;font-size:16px;outline:none;text-align:center}input:focus{border-color:#5b57d9}
+button{padding:11px;border-radius:9px;border:none;background:#20231f;color:#fff;
+font-size:15px;cursor:pointer}.err{color:#b84b52;font-size:13px;min-height:18px}</style>
 </head><body><form method=post action=/login>
 <h1>🪶 Quill</h1>
 <input type=password name=password placeholder="Password" autofocus>
@@ -244,6 +245,10 @@ def get_session(session_id: str, lang: str = "en"):
             d["lang"] = lang
             d["title"] = alt["title"] or d["title"]
             d["overview_md"] = alt["overview_md"] or d["overview_md"]
+            # Old translation rows predate structured summaries. Return an
+            # empty localized summary in that case so the client derives its
+            # lead from the translated overview instead of mixing in English.
+            d["summary"] = _json.loads(alt["summary_json"] or "{}")
             d["outline"] = _json.loads(alt["outline_json"] or "[]") or d["outline"]
             d["keywords"] = _json.loads(alt["keywords_json"] or "[]") or d["keywords"]
             for a in d["actions"]:
@@ -324,7 +329,9 @@ async def translate(session_id: str, lang: str = "ru"):
 
     outline = _json.loads(row["outline_json"] or "[]")
     keywords = _json.loads(row["keywords_json"] or "[]")
+    summary = _json.loads(row["summary_json"] or "{}")
     snapshot_hash = row["segments_hash"]
+    snapshot_revision = row["artifacts_revision"]
     snapshot_ids = {a["id"] for a in actions}
     jid = _new_job()
     _translate_inflight[flight_key] = jid
@@ -335,28 +342,34 @@ async def translate(session_id: str, lang: str = "ru"):
                 # Cache exists; only newer actions need translating.
                 out = await ai.translate_artifacts(
                     "Russian", row["title"] or session_id, "",
+                    {"brief": "", "decisions": [], "open_questions": []},
                     [], [], [{"id": a["id"], "text": a["text"]} for a in missing])
             else:
                 out = await ai.translate_artifacts(
                     "Russian", row["title"] or session_id, row["overview_md"] or "",
-                    outline, keywords,
+                    summary, outline, keywords,
                     [{"id": a["id"], "text": a["text"]} for a in actions])
             with db.closing_conn() as conn:
                 # Stale guard (#1): if the transcript re-ingested or the AI
-                # regenerated (new action ids / new hash), this snapshot is
-                # dead — discard rather than publish mixed-language state.
+                # regenerated (revision, action ids, or transcript hash), this
+                # snapshot is dead — discard rather than publish mixed-language state.
                 cur = conn.execute(
-                    "SELECT segments_hash FROM sessions WHERE id=?", (session_id,)).fetchone()
+                    "SELECT segments_hash, artifacts_revision FROM sessions WHERE id=?",
+                    (session_id,)).fetchone()
                 cur_ids = {r["id"] for r in conn.execute(
                     "SELECT id FROM actions WHERE session_id=?", (session_id,))}
-                if not cur or cur["segments_hash"] != snapshot_hash or not snapshot_ids <= cur_ids:
+                if (not cur or cur["segments_hash"] != snapshot_hash
+                        or cur["artifacts_revision"] != snapshot_revision
+                        or not snapshot_ids <= cur_ids):
                     raise ai.AIError("notes changed while translating — flip RU again")
                 if not (cached and missing):
                     conn.execute(
                         """INSERT OR REPLACE INTO artifacts_lang
-                           (session_id, lang, title, overview_md, outline_json, keywords_json)
-                           VALUES (?,?,?,?,?,?)""",
+                           (session_id, lang, title, overview_md, summary_json,
+                            outline_json, keywords_json)
+                           VALUES (?,?,?,?,?,?,?)""",
                         (session_id, lang, out["title"], out["overview_md"],
+                         _json.dumps(out["summary"], ensure_ascii=False),
                          _json.dumps(out["outline"], ensure_ascii=False),
                          _json.dumps(out["keywords"], ensure_ascii=False)))
                 for item in out["actions"]:
@@ -461,6 +474,21 @@ def shared_payload(token: str, response: Response):
         "started_at": d["started_at"],
         "duration_s": d["duration_s"],
         "overview_md": d.get("overview_md"),
+        "summary": {
+            "brief": str((d.get("summary") or {}).get("brief") or ""),
+            "decisions": [
+                {"text": str(item.get("text") or ""),
+                 "source_ms": item.get("source_ms")}
+                for item in (d.get("summary") or {}).get("decisions", [])
+                if isinstance(item, dict) and item.get("text")
+            ],
+            "open_questions": [
+                {"text": str(item.get("text") or ""),
+                 "source_ms": item.get("source_ms")}
+                for item in (d.get("summary") or {}).get("open_questions", [])
+                if isinstance(item, dict) and item.get("text")
+            ],
+        },
         "outline": [{"ms": int(o["ms"]), "label": o["label"]} for o in d.get("outline", [])],
         "segments": [
             {"idx": s["idx"],
@@ -484,10 +512,10 @@ def shared_audio(token: str, track: str, request: Request):
 
 DEAD_LINK_HTML = """<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Quill</title>
-<style>body{background:#0d1117;color:#e8e4da;font-family:-apple-system,sans-serif;
+<style>body{background:#f1f3ef;color:#20231f;font-family:-apple-system,sans-serif;
 display:grid;place-items:center;min-height:100vh;margin:0;text-align:center}
-h1{font-family:'Iowan Old Style',Georgia,serif;font-weight:500}
-p{color:#9aa3ae}</style></head><body><div>
+h1{font-family:Charter,'Iowan Old Style',Georgia,serif;font-weight:600}
+p{color:#6f756f}</style></head><body><div>
 <h1>🪶 Эта ссылка больше не действует</h1>
 <p>This link is no longer active. Ask the person who shared it for a new one.</p>
 </div></body></html>"""

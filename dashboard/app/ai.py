@@ -101,10 +101,42 @@ def _parse_json(text: str) -> dict:
 ARTIFACTS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["title", "overview_md", "outline", "keywords", "tags", "actions"],
+    "required": ["title", "overview_md", "summary", "outline", "keywords", "tags", "actions"],
     "properties": {
         "title": {"type": "string"},
         "overview_md": {"type": "string"},
+        "summary": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["brief", "decisions", "open_questions"],
+            "properties": {
+                "brief": {"type": "string"},
+                "decisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["text", "source_ms"],
+                        "properties": {
+                            "text": {"type": "string"},
+                            "source_ms": {"type": ["integer", "null"]},
+                        },
+                    },
+                },
+                "open_questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["text", "source_ms"],
+                        "properties": {
+                            "text": {"type": "string"},
+                            "source_ms": {"type": ["integer", "null"]},
+                        },
+                    },
+                },
+            },
+        },
         "outline": {
             "type": "array",
             "items": {
@@ -172,10 +204,21 @@ Timestamps are [m:ss] from recording start.
 
 Produce a JSON object with:
 - title: short specific title for the meeting (max 60 chars, no date, in {config.SUMMARY_LANGUAGE})
-- overview_md: meeting notes in {config.SUMMARY_LANGUAGE} as markdown. Structure: topic-labeled
-  H3 sections (### Topic) with tight bullet points under each; capture decisions,
-  numbers, names, commitments. Keep any quoted phrases verbatim in their original
-  language. No preamble, no "the meeting was about" filler.
+- summary: a structured high-signal layer in {config.SUMMARY_LANGUAGE}:
+  - brief: one or two direct sentences (30-60 words total) saying what happened, the
+    outcome, and why it matters. Lead with the result, not "the meeting discussed".
+  - decisions: 0-8 explicit decisions or settled choices only. Each has text and
+    source_ms: the supporting transcript timestamp converted from m:ss to
+    milliseconds. Do not turn observations, ideas, or general advice into decisions.
+  - open_questions: 0-8 genuinely unresolved questions, blockers, or choices.
+    Each has text and source_ms in milliseconds. Do not invent uncertainty where
+    the call resolved it.
+- overview_md: the readable detailed notes in {config.SUMMARY_LANGUAGE}. Use 3-8
+  topic-labeled H3 sections (### Topic) with 2-5 tight bullets each. Put the most
+  consequential topics first. Preserve exact names, numbers, constraints, and
+  reasoning, but merge repetition and omit small talk. Keep quoted phrases verbatim
+  in their original language. No preamble, generic recap, conclusion, or duplicated
+  action-item section.
 - outline: 3-10 chapter markers [{{"ms": <start of the moment in milliseconds>, "label": "<short chapter label>"}}]
   using the transcript timestamps (convert m:ss to ms).
 - keywords: 3-8 short topical keywords.
@@ -219,6 +262,9 @@ Answer with the JSON object only."""
     for key in ("title", "overview_md"):
         if not isinstance(art.get(key), str) or not art[key].strip():
             raise AIError(f"AI artifacts missing {key}")
+    summary = art.get("summary")
+    if not isinstance(summary, dict) or not str(summary.get("brief", "")).strip():
+        raise AIError("AI artifacts missing summary brief")
     return art
 
 
@@ -273,10 +319,11 @@ Answer:"""
 TRANSLATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["title", "overview_md", "outline", "keywords", "actions"],
+    "required": ["title", "overview_md", "summary", "outline", "keywords", "actions"],
     "properties": {
         "title": {"type": "string"},
         "overview_md": {"type": "string"},
+        "summary": ARTIFACTS_SCHEMA["properties"]["summary"],
         "outline": {
             "type": "array",
             "items": {
@@ -301,6 +348,7 @@ TRANSLATION_SCHEMA = {
 
 
 async def translate_artifacts(target_lang: str, title: str, overview_md: str,
+                              summary: dict,
                               outline: list[dict], keywords: list[str],
                               actions: list[dict]) -> dict:
     """Translate the AI artifacts of one meeting. Items carry stable keys
@@ -309,6 +357,7 @@ async def translate_artifacts(target_lang: str, title: str, overview_md: str,
     payload = json.dumps({
         "title": title,
         "overview_md": overview_md,
+        "summary": summary,
         "outline": outline,
         "keywords": keywords,
         "actions": actions,
@@ -317,9 +366,10 @@ async def translate_artifacts(target_lang: str, title: str, overview_md: str,
 Rules: natural business {target_lang}, not word-for-word; keep markdown structure
 (### headings, bullets, **bold**) intact in overview_md; keep numbers, names,
 and product terms as-is; quoted phrases already in {target_lang} stay verbatim.
-Keep every "ms" and every "id" EXACTLY as given — they are keys, not content.
-Return JSON with the same shape: title, overview_md, outline (same ms values),
-keywords, actions (same id values).
+Keep every "source_ms", every "ms", and every "id" EXACTLY as given — they are
+keys, not content. Return JSON with the same shape: title, overview_md, summary
+(brief, decisions, open_questions), outline (same ms values), keywords, actions
+(same id values).
 
 {payload}"""
     raw = await run_codex(prompt, "medium", TRANSLATION_SCHEMA, interactive=True)
@@ -328,4 +378,9 @@ keywords, actions (same id values).
         raise AIError("translation lost chapter identity (ms mismatch)")
     if {x["id"] for x in out.get("actions", [])} != {x["id"] for x in actions}:
         raise AIError("translation lost action identity (id mismatch)")
+    for key in ("decisions", "open_questions"):
+        before = [item.get("source_ms") for item in summary.get(key, [])]
+        after = [item.get("source_ms") for item in out.get("summary", {}).get(key, [])]
+        if before != after:
+            raise AIError(f"translation lost summary identity ({key} timestamp mismatch)")
     return out

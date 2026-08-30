@@ -159,6 +159,44 @@ class RetryPersistenceTests(unittest.TestCase):
         self.assertIsNone(promoted["ai_error"])
         self.assertIsNotNone(promoted["segments_hash"])
 
+    def test_structured_summary_round_trips_and_legacy_rows_default_empty(self):
+        segments = [{
+            "speaker": "me", "start_ms": 0, "end_ms": 1000,
+            "text": "We will ship on Friday. The budget is still open.",
+        }]
+        with db.closing_conn() as conn:
+            db.upsert_session(
+                conn, "structured", "2026-08-30T10:00:00+00:00", 1,
+                "test", segments, False, False)
+            db.save_ai_artifacts(conn, "structured", {
+                "title": "Friday launch",
+                "overview_md": "### Launch\n- Ship on Friday.",
+                "summary": {
+                    "brief": "The launch is set for Friday while budget remains open.",
+                    "decisions": [{"text": "Ship on Friday", "source_ms": 0}],
+                    "open_questions": [{"text": "What is the budget?", "source_ms": 500}],
+                },
+                "outline": [], "keywords": [], "tags": [], "actions": [],
+            })
+            structured = db.session_row_to_dict(conn.execute(
+                "SELECT * FROM sessions WHERE id='structured'").fetchone())
+            conn.execute(
+                """INSERT INTO sessions (id, started_at, overview_md, ai_status)
+                   VALUES ('legacy', '2026-08-29T10:00:00+00:00',
+                           '### Existing notes', 'done')""")
+            legacy = db.session_row_to_dict(conn.execute(
+                "SELECT * FROM sessions WHERE id='legacy'").fetchone())
+
+        self.assertEqual(structured["summary"]["decisions"][0]["source_ms"], 0)
+        self.assertEqual(structured["summary"]["open_questions"][0]["text"],
+                         "What is the budget?")
+        self.assertEqual(structured["artifacts_revision"], 1)
+        self.assertEqual(legacy["summary"], {})
+        with db.closing_conn() as conn:
+            translated_columns = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(artifacts_lang)")}
+        self.assertIn("summary_json", translated_columns)
+
 
 if __name__ == "__main__":
     unittest.main()

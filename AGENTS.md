@@ -141,9 +141,11 @@ Tell the operator, in their words:
 
 - **Record**: click the feather (or the Desktop button). Closing the laptop lid
   ends the recording cleanly — it transcribes and uploads on wake.
-- **Notes** appear automatically; `↻ Regenerate` re-runs the AI on a meeting.
-- **Ask**: chat at the top of any meeting, or the "Ask" tab to query every
-  meeting at once.
+- **Notes** appear automatically. Meetings open on **Summary** (outcome,
+  decisions, topic notes, open questions, and actions); the verbatim record is
+  under **Transcript**. `••• → Regenerate summary` re-runs the AI.
+- **Ask**: use the meeting's **Ask** tab, or the workspace **Ask** view to query
+  every meeting at once.
 - **Share**: opens a read-only link for one meeting — no account needed on the
   other end, revocable with **Unshare**.
 - **Language**: the EN/RU toggle translates notes on demand and remembers the
