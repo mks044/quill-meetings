@@ -282,3 +282,100 @@ summary/full copy, shared copy, mobile modal layout, and regeneration warning on
 an isolated real-data backup. Deploy only after all prior recording/playback
 flows remain green. The migration is additive; a rollback ignores edit metadata
 and leaves the latest saved note content readable by the previous release.
+
+---
+
+# Section 3 — privacy-tiered sharing
+
+## Why this is next
+
+The private workspace and editable note are now strong, but Quill's one-click
+share still gives any anonymous token holder the summary, verbatim transcript,
+and every audio track. Wispr's current link model makes anonymous links
+summary-only and reserves transcript access for an explicitly stronger grant.
+Quill has no recipient accounts or email invitations, so the closest honest
+adaptation is a safe summary-only link by default with a deliberate owner
+choice to grant the full meeting through that same revocable link.
+
+## Product contract
+
+The **Share** button opens an owner-only dialog instead of publishing and
+copying immediately. It offers two mutually exclusive scopes:
+
+1. **Summary only (recommended)** — title, meeting metadata, brief, decisions,
+   detailed notes, open questions, and read-only actions. The guest API does
+   not send transcript segments, timeline chapters, audio availability, or
+   audio bytes.
+2. **Full meeting** — everything above plus transcript, source navigation,
+   timeline, and playable audio. The choice carries a clear warning that anyone
+   holding the link can hear and read the raw conversation.
+
+New links start on Summary only. Existing links retain Full meeting during the
+additive migration so an already-sent link does not silently break, but their
+current scope is shown when the owner next opens Share. Updating language or
+scope reuses the existing unguessable URL; revoking removes it immediately.
+Recipients are always read-only.
+
+Summary-only guests see a labelled summary-only surface and a disabled
+Transcript tab explaining that the owner did not share the raw recording.
+Source timestamps are non-interactive, no player is loaded, and Copy summary
+continues to work. Full guests retain the current transcript/audio experience.
+
+## Storage and authorization
+
+Add `share_tokens.access_level` with values `summary` or `full`:
+
+- new databases use a `summary` default;
+- the one-time old-database migration adds a nullable column and marks only
+  pre-existing rows `full` for backwards compatibility;
+- all application writes explicitly persist a validated value;
+- reads fail closed: anything other than the exact string `full` is treated as
+  `summary`.
+
+`POST /api/sessions/{id}/share?lang=en|ru&access_level=summary|full` validates
+both fields, serializes create/update with an immediate SQLite transaction, and
+returns the reused token, URL, language, and effective scope. `GET .../share`
+returns the same state without exposing a token anywhere else.
+
+`GET /api/shared/{token}` constructs two allow-list DTOs. The summary DTO omits
+`segments`, `outline`, and all `has_audio_*` fields entirely; the full DTO adds
+only the current strict transcript/timeline/audio fields. The shared audio route
+checks scope before resolving a session or file and returns 403 for a valid
+summary-only link. Revocation and invalid tokens remain 404.
+
+## Frontend composition
+
+- Reuse the modal visual language and keyboard discipline from Edit notes:
+  focus trap, Escape/close, focus return, inline failure, and mobile layout.
+- Radio-card copy explains the actual data grant rather than using vague
+  privacy labels.
+- **Copy link** both persists the selected scope and copies the URL, with a
+  localized toast that says either “Summary link copied” or “Full meeting link
+  copied.”
+- Existing active links expose **Revoke link** inside the dialog; the existing
+  menu shortcut remains but gains confirmation and success feedback.
+- The guest renderer branches only on the server-provided effective scope and
+  remains resilient to omitted arrays/flags.
+
+## Files
+
+- `dashboard/app/db.py` — additive access-level migration
+- `dashboard/app/main.py` — validated share state, fail-closed DTO builder, and
+  audio authorization
+- `dashboard/static/app.js` — share dialog and scope-aware guest renderer
+- `dashboard/static/style.css` — permission cards, compact dialog, locked tab
+- `dashboard/test_share_access.py` — API-level scope and audio leakage tests
+- `dashboard/test_reliability.py` — migration/backwards-compatibility assertions
+- `README.md`, `AGENTS.md`, `status.md` — exact sharing semantics
+
+## Verification and rollback
+
+Use an isolated database with real-shaped summary, transcript, and dummy audio
+to prove summary payload and audio denial, same-token scope transitions, full
+payload/range audio, validation, and revocation. Browser-test new-owner default,
+existing-full state, both guest surfaces, copy feedback, keyboard/mobile layout,
+and direct summary-audio denial. Production verification must not change a real
+link: inspect migration/state, send only invalid no-op requests, verify any
+existing full link remains compatible, compare hashes, logs, queue, and SQLite
+integrity. Rolling back code leaves `access_level` ignored and preserves every
+token; no recording, transcript, note, or action data is rewritten.

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import sys
 import types
@@ -203,6 +204,37 @@ class RetryPersistenceTests(unittest.TestCase):
         self.assertIn("notes_edited_at", session_columns)
         self.assertIn("notes_revision", translated_columns)
         self.assertIn("notes_revision", session_columns)
+
+    def test_share_scope_migration_preserves_old_links_but_new_default_is_summary(self):
+        with db.closing_conn() as conn:
+            columns = {row["name"]: row for row in conn.execute(
+                "PRAGMA table_info(share_tokens)")}
+        self.assertEqual(columns["access_level"]["notnull"], 1)
+        self.assertEqual(columns["access_level"]["dflt_value"], "'summary'")
+
+        legacy_temp = tempfile.TemporaryDirectory()
+        legacy_db = Path(legacy_temp.name) / "legacy.db"
+        raw = sqlite3.connect(legacy_db)
+        raw.execute(
+            """CREATE TABLE share_tokens (
+                 token TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                 lang TEXT NOT NULL DEFAULT 'en', created_at TEXT)""")
+        raw.execute(
+            "INSERT INTO share_tokens VALUES ('already-sent','meeting','en','2026-08-01')")
+        raw.commit()
+        raw.close()
+        current_db = config.DB_PATH
+        try:
+            config.DB_PATH = legacy_db
+            db.init()
+            with db.closing_conn() as conn:
+                migrated = conn.execute(
+                    "SELECT access_level FROM share_tokens WHERE token='already-sent'"
+                ).fetchone()["access_level"]
+            self.assertEqual(migrated, "full")
+        finally:
+            config.DB_PATH = current_db
+            legacy_temp.cleanup()
 
     def test_english_owner_edit_is_atomic_and_invalidates_translation(self):
         segments = [{

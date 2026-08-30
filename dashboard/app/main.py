@@ -214,16 +214,17 @@ def list_sessions(q: str = "", tag: str = ""):
     return {"sessions": sessions}
 
 
-@app.get("/api/sessions/{session_id}")
-def get_session(session_id: str, lang: str = "en"):
+def _session_payload(session_id: str, lang: str = "en",
+                     include_segments: bool = True):
     import json as _json
     with db.closing_conn() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         if not row:
             raise HTTPException(404, "unknown session")
-        segs = conn.execute(
+        segs = (conn.execute(
             "SELECT idx, speaker, start_ms, end_ms, text FROM segments"
             " WHERE session_id=? ORDER BY idx", (session_id,)).fetchall()
+            if include_segments else [])
         actions = conn.execute(
             "SELECT id, text, ru_text, assignee, source_ms, done FROM actions"
             " WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
@@ -257,6 +258,11 @@ def get_session(session_id: str, lang: str = "en"):
                 if a.get("ru_text"):
                     a["text"] = a["ru_text"]
     return d
+
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str, lang: str = "en"):
+    return _session_payload(session_id, lang=lang, include_segments=True)
 
 
 class NoteItemEdit(BaseModel):
@@ -507,9 +513,22 @@ def _public_base(request: Request) -> str:
     return f"{proto}://{host}"
 
 
+def _share_access(value: str | None) -> str:
+    """Normalize persisted access fail-closed."""
+    return "full" if value == "full" else "summary"
+
+
 @app.post("/api/sessions/{session_id}/share")
-def create_share(session_id: str, request: Request, lang: str = "en"):
+def create_share(session_id: str, request: Request, lang: str = "en",
+                 access_level: str = "summary"):
+    if lang not in ("en", "ru"):
+        raise HTTPException(400, "only en and ru are supported")
+    if access_level not in ("summary", "full"):
+        raise HTTPException(400, "access_level must be summary or full")
     with db.closing_conn() as conn:
+        # Serialize token creation so simultaneous Copy link clicks cannot mint
+        # two active URLs for one meeting.
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT segments_hash FROM sessions WHERE id=?", (session_id,)
         ).fetchone()
@@ -517,18 +536,26 @@ def create_share(session_id: str, request: Request, lang: str = "en"):
             raise HTTPException(404, "unknown session")
         if row["segments_hash"] is None:
             raise HTTPException(409, "local transcription is not ready")
+        if lang == "ru" and not conn.execute(
+                "SELECT 1 FROM artifacts_lang WHERE session_id=? AND lang='ru'",
+                (session_id,)).fetchone():
+            raise HTTPException(409, "Russian notes are not ready — translate first")
         row = conn.execute(
-            "SELECT token FROM share_tokens WHERE session_id=?", (session_id,)).fetchone()
+            "SELECT token FROM share_tokens WHERE session_id=? ORDER BY created_at LIMIT 1",
+            (session_id,)).fetchone()
         if row:
-            conn.execute("UPDATE share_tokens SET lang=? WHERE session_id=?",
-                         (lang, session_id))
-            return {"token": row["token"], "lang": lang,
+            conn.execute(
+                "UPDATE share_tokens SET lang=?, access_level=? WHERE session_id=?",
+                (lang, access_level, session_id))
+            return {"token": row["token"], "lang": lang, "access_level": access_level,
                     "url": f"{_public_base(request)}/s/{row['token']}"}
         token = secrets.token_urlsafe(18)
         conn.execute(
-            "INSERT INTO share_tokens (token, session_id, lang) VALUES (?,?,?)",
-            (token, session_id, lang))
-    return {"token": token, "lang": lang, "url": f"{_public_base(request)}/s/{token}"}
+            """INSERT INTO share_tokens (token, session_id, lang, access_level)
+               VALUES (?,?,?,?)""",
+            (token, session_id, lang, access_level))
+    return {"token": token, "lang": lang, "access_level": access_level,
+            "url": f"{_public_base(request)}/s/{token}"}
 
 
 @app.delete("/api/sessions/{session_id}/share")
@@ -542,8 +569,14 @@ def revoke_share(session_id: str):
 def get_share(session_id: str):
     with db.closing_conn() as conn:
         row = conn.execute(
-            "SELECT token, lang FROM share_tokens WHERE session_id=?", (session_id,)).fetchone()
-    return {"token": row["token"] if row else None, "lang": row["lang"] if row else None}
+            """SELECT token, lang, access_level FROM share_tokens
+               WHERE session_id=? ORDER BY created_at LIMIT 1""",
+            (session_id,)).fetchone()
+    return {
+        "token": row["token"] if row else None,
+        "lang": row["lang"] if row else None,
+        "access_level": _share_access(row["access_level"]) if row else None,
+    }
 
 
 def _shared_session(token: str):
@@ -557,11 +590,15 @@ def _shared_session(token: str):
 @app.get("/api/shared/{token}")
 def shared_payload(token: str, response: Response):
     t = _shared_session(token)
-    d = get_session(t["session_id"], lang=t["lang"])
-    # Strict guest DTO: exactly what the share page renders, nothing else.
+    access_level = _share_access(t["access_level"])
+    d = _session_payload(
+        t["session_id"], lang=t["lang"], include_segments=access_level == "full")
+    # Strict guest DTO: summary links never serialize raw conversation data.
     response.headers["Cache-Control"] = "private, no-store"
-    return {
+    response.headers["Referrer-Policy"] = "no-referrer"
+    payload = {
         "shared": True,
+        "access_level": access_level,
         "id": d["id"],
         "lang": d["lang"],
         "title": d.get("title"),
@@ -583,25 +620,38 @@ def shared_payload(token: str, response: Response):
                 if isinstance(item, dict) and item.get("text")
             ],
         },
-        "outline": [{"ms": int(o["ms"]), "label": o["label"]} for o in d.get("outline", [])],
-        "segments": [
-            {"idx": s["idx"],
-             "speaker": s["speaker"] if s["speaker"] in ("me", "them") else "them",
-             "start_ms": int(s["start_ms"]), "end_ms": int(s["end_ms"]),
-             "text": s["text"]}
-            for s in d["segments"]],
         "actions": [{"text": a["text"], "assignee": a.get("assignee"),
                      "done": bool(a["done"])} for a in d["actions"]],
-        "has_audio_mixed": d["has_audio_mixed"],
-        "has_audio_system": d["has_audio_system"],
-        "has_audio_mic": d["has_audio_mic"],
     }
+    if access_level == "full":
+        payload.update({
+            "outline": [
+                {"ms": int(o["ms"]), "label": o["label"]}
+                for o in d.get("outline", [])
+            ],
+            "segments": [
+                {"idx": s["idx"],
+                 "speaker": s["speaker"] if s["speaker"] in ("me", "them") else "them",
+                 "start_ms": int(s["start_ms"]), "end_ms": int(s["end_ms"]),
+                 "text": s["text"]}
+                for s in d["segments"]
+            ],
+            "has_audio_mixed": d["has_audio_mixed"],
+            "has_audio_system": d["has_audio_system"],
+            "has_audio_mic": d["has_audio_mic"],
+        })
+    return payload
 
 
 @app.get("/api/shared/{token}/audio/{track}")
 def shared_audio(token: str, track: str, request: Request):
     t = _shared_session(token)
-    return audio(t["session_id"], track, request)
+    if _share_access(t["access_level"]) != "full":
+        raise HTTPException(403, "this link shares the summary only")
+    response = audio(t["session_id"], track, request)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 DEAD_LINK_HTML = """<!DOCTYPE html><html><head><meta charset=utf-8>
@@ -621,7 +671,11 @@ def share_page(token: str):
         _shared_session(token)
     except HTTPException:
         return HTMLResponse(DEAD_LINK_HTML, status_code=404)
-    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+    response = FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
 
 
 # ---------------------------------------------------------------- audio

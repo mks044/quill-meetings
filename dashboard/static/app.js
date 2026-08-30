@@ -318,15 +318,144 @@ function openNotesEditor(s, lang, onSaved) {
   $("#edit-title", backdrop).focus();
 }
 
-function sourceListHTML(items, lang) {
+async function openShareDialog(s, lang) {
+  let state;
+  try { state = await api(`/api/sessions/${encodeURIComponent(s.id)}/share`); }
+  catch (err) {
+    showToast(copy(lang, `Couldn't load sharing: ${err.message}`, `Не удалось открыть доступ: ${err.message}`));
+    return;
+  }
+  $("#share-dialog-backdrop")?.remove();
+  const access = state.access_level || "summary";
+  const backdrop = document.createElement("div");
+  backdrop.id = "share-dialog-backdrop";
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `<div class="share-dialog" role="dialog" aria-modal="true" aria-labelledby="share-dialog-title">
+    <form id="share-dialog-form">
+      <header class="editor-head">
+        <div><div class="section-kicker">${copy(lang, "Owner-controlled access", "Доступ под вашим контролем")}</div>
+          <h2 id="share-dialog-title">${copy(lang, "Share this meeting", "Поделиться встречей")}</h2></div>
+        <button type="button" class="editor-close" aria-label="${copy(lang, "Close sharing", "Закрыть настройки доступа")}">×</button>
+      </header>
+      <div class="share-dialog-body">
+        <p class="share-intro">${copy(lang,
+          "Choose exactly what anyone holding this link can open.",
+          "Выберите, что сможет открыть любой человек с этой ссылкой.")}</p>
+        <div class="share-access-list" role="radiogroup" aria-label="${copy(lang, "Link access", "Доступ по ссылке")}">
+          <label class="share-access-option">
+            <input type="radio" name="share-access" value="summary" ${access === "summary" ? "checked" : ""}>
+            <span class="share-access-copy"><b>${copy(lang, "Summary only", "Только резюме")}</b>
+              <small>${copy(lang,
+                "Notes, decisions, open questions, and actions. Transcript and audio stay private.",
+                "Заметки, решения, вопросы и задачи. Транскрипт и аудио останутся закрыты.")}</small></span>
+            <span class="recommended-pill">${copy(lang, "Recommended", "Рекомендуется")}</span>
+          </label>
+          <label class="share-access-option full-access">
+            <input type="radio" name="share-access" value="full" ${access === "full" ? "checked" : ""}>
+            <span class="share-access-copy"><b>${copy(lang, "Full meeting", "Вся встреча")}</b>
+              <small>${copy(lang,
+                "Includes the raw transcript and playable audio. Anyone with the link gets both.",
+                "Включает полный транскрипт и аудио. Их получит любой человек со ссылкой.")}</small></span>
+          </label>
+        </div>
+        ${state.token ? `<p class="share-active"><span></span>${copy(lang, "This link is active", "Ссылка уже активна")}</p>` : ""}
+      </div>
+      <div class="editor-error" id="share-dialog-error" role="alert"></div>
+      <footer class="editor-foot share-dialog-foot">
+        ${state.token ? `<button type="button" class="btn danger share-dialog-revoke">${copy(lang, "Revoke link", "Отозвать ссылку")}</button>` : ""}
+        <span class="share-foot-spacer"></span>
+        <button type="button" class="btn editor-cancel">${copy(lang, "Cancel", "Отмена")}</button>
+        <button type="submit" class="btn primary share-dialog-copy">${copy(lang, "Copy link", "Скопировать ссылку")}</button>
+      </footer>
+    </form>
+  </div>`;
+  document.body.appendChild(backdrop);
+  document.body.classList.add("modal-open");
+  const form = $("#share-dialog-form", backdrop);
+  const returnFocus = $("#btn-share") || document.activeElement;
+  let working = false;
+  const close = () => {
+    if (working) return;
+    document.removeEventListener("keydown", onKeydown);
+    document.body.classList.remove("modal-open");
+    backdrop.remove();
+    returnFocus?.focus?.();
+  };
+  const onKeydown = (event) => {
+    if (event.key === "Escape") { close(); return; }
+    if (event.key !== "Tab") return;
+    const focusable = [...backdrop.querySelectorAll(
+      'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    )].filter((element) => element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  };
+  const updateSelected = () => backdrop.querySelectorAll(".share-access-option").forEach((option) =>
+    option.classList.toggle("selected", $("input", option).checked));
+  updateSelected();
+  form.addEventListener("change", updateSelected);
+  document.addEventListener("keydown", onKeydown);
+  backdrop.addEventListener("click", (event) => { if (event.target === backdrop) close(); });
+  $(".editor-close", backdrop).addEventListener("click", close);
+  $(".editor-cancel", backdrop).addEventListener("click", close);
+  $(".share-dialog-revoke", backdrop)?.addEventListener("click", async () => {
+    if (!confirm(copy(lang,
+      "Revoke this link now? Anyone using it will lose access.",
+      "Отозвать ссылку? Все, у кого она есть, сразу потеряют доступ."))) return;
+    const error = $("#share-dialog-error", backdrop);
+    working = true; error.textContent = "";
+    try {
+      await api(`/api/sessions/${encodeURIComponent(s.id)}/share`, { method: "DELETE" });
+      working = false;
+      $("#btn-unshare")?.classList.add("hidden");
+      close();
+      showToast(copy(lang, "Share link revoked", "Ссылка отозвана"));
+    } catch (err) {
+      working = false; error.textContent = err.message;
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (working) return;
+    const selected = form.elements["share-access"].value;
+    const button = $(".share-dialog-copy", backdrop);
+    const error = $("#share-dialog-error", backdrop);
+    working = true; button.disabled = true; error.textContent = "";
+    button.textContent = copy(lang, "Preparing…", "Создаю…");
+    try {
+      const result = await post(
+        `/api/sessions/${encodeURIComponent(s.id)}/share?lang=${lang}&access_level=${selected}`);
+      await copyText(result.url, lang, selected === "full"
+        ? copy(lang, "Full meeting link copied", "Ссылка на всю встречу скопирована")
+        : copy(lang, "Summary link copied", "Ссылка на резюме скопирована"));
+      working = false;
+      $("#btn-unshare")?.classList.remove("hidden");
+      close();
+    } catch (err) {
+      working = false; button.disabled = false; error.textContent = err.message;
+      button.textContent = copy(lang, "Copy link", "Скопировать ссылку");
+    }
+  });
+  $("input:checked", backdrop)?.focus();
+}
+
+function sourceListHTML(items, lang, { linked = true } = {}) {
   return `<ul class="source-list">${items.map((item) => `<li>
     <span>${esc(item.text)}</span>
-    ${item.source_ms != null ? `<button class="source-time" data-jump-ms="${item.source_ms}" title="${copy(lang, "Open transcript at", "Открыть транскрипт на")} ${fmt(item.source_ms)}">${fmt(item.source_ms)}</button>` : ""}
+    ${item.source_ms == null ? "" : linked
+      ? `<button class="source-time" data-jump-ms="${item.source_ms}" title="${copy(lang, "Open transcript at", "Открыть транскрипт на")} ${fmt(item.source_ms)}">${fmt(item.source_ms)}</button>`
+      : `<span class="source-time static" title="${copy(lang, "Source time", "Время в источнике")}">${fmt(item.source_ms)}</span>`}
   </li>`).join("")}</ul>`;
 }
 
 function summaryDocumentHTML(s, lang, { shared = false } = {}) {
   const summary = summaryModel(s);
+  const linkedSources = !shared || s.access_level === "full";
   const status = s.ai_status && s.ai_status !== "done" ? `<div class="pipeline-note ${esc(s.ai_status)}">
     <span class="pipeline-dot"></span><span>${esc(aiLabel(s, lang))}</span></div>` : "";
   return `<article class="summary-paper">
@@ -338,14 +467,14 @@ function summaryDocumentHTML(s, lang, { shared = false } = {}) {
         : `<p class="summary-empty">${copy(lang, "The summary is still being prepared.", "Краткое резюме ещё готовится.")}</p>`}
     </section>
     ${summary.decisions.length ? `<section class="summary-section summary-decisions">
-      <h2>${copy(lang, "Decisions", "Решения")}</h2>${sourceListHTML(summary.decisions, lang)}
+      <h2>${copy(lang, "Decisions", "Решения")}</h2>${sourceListHTML(summary.decisions, lang, { linked: linkedSources })}
     </section>` : ""}
     ${s.overview_md ? `<section class="summary-section">
       <h2>${copy(lang, "Detailed notes", "Подробные заметки")}</h2>
       <div class="overview">${md(s.overview_md)}</div>
     </section>` : ""}
     ${summary.openQuestions.length ? `<section class="summary-section summary-open">
-      <h2>${copy(lang, "Still open", "Осталось решить")}</h2>${sourceListHTML(summary.openQuestions, lang)}
+      <h2>${copy(lang, "Still open", "Осталось решить")}</h2>${sourceListHTML(summary.openQuestions, lang, { linked: linkedSources })}
     </section>` : ""}
     ${!shared ? `<button class="ask-launch" data-open-tab="ask">
       <span><b>${copy(lang, "Ask about this meeting", "Спросить об этой встрече")}</b>
@@ -587,27 +716,36 @@ async function sharedView(token) {
   }
   const lang = s.lang;
   const d = dateParts(s.started_at);
-  const tracks = [s.has_audio_mixed && "mixed", s.has_audio_system && "system", s.has_audio_mic && "mic"].filter(Boolean);
-  const turns = groupTurns(s.segments);
+  const fullAccess = s.access_level === "full";
+  const tracks = fullAccess
+    ? [s.has_audio_mixed && "mixed", s.has_audio_system && "system", s.has_audio_mic && "mic"].filter(Boolean)
+    : [];
+  const turns = groupTurns(fullAccess ? s.segments : []);
   const durationMs = Math.max(s.duration_s * 1000, 1);
 
   view.innerHTML = `<div class="meeting-page shared-meeting">
     <header class="meeting-header shared-header">
       <div><div class="meeting-eyebrow">${copy(lang, "Shared meeting", "Встреча по ссылке")}</div>
         <h1>${esc(s.title || s.id)}</h1>
-        <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span></div></div>
+        <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span></div>
+        <div class="shared-scope ${fullAccess ? "full" : "summary"}"><span aria-hidden="true">${fullAccess ? "◉" : "◇"}</span>
+          ${fullAccess
+            ? copy(lang, "Full meeting · transcript and audio included", "Вся встреча · транскрипт и аудио доступны")
+            : copy(lang, "Summary only · transcript and audio stay private", "Только резюме · транскрипт и аудио закрыты")}</div></div>
       <button class="btn shared-copy" id="shared-copy-summary">${copy(lang, "Copy summary", "Скопировать резюме")}</button>
     </header>
     <nav class="meeting-tabs" role="tablist" aria-label="${copy(lang, "Meeting view", "Раздел встречи")}">
       <button id="shared-tab-summary" role="tab" aria-selected="true" aria-controls="shared-summary" data-meeting-tab="summary">${copy(lang, "Summary", "Резюме")}</button>
-      <button id="shared-tab-transcript" role="tab" aria-selected="false" aria-controls="shared-transcript" data-meeting-tab="transcript">${copy(lang, "Transcript", "Транскрипт")}</button>
+      ${fullAccess
+        ? `<button id="shared-tab-transcript" role="tab" aria-selected="false" aria-controls="shared-transcript" data-meeting-tab="transcript">${copy(lang, "Transcript", "Транскрипт")}</button>`
+        : `<button class="locked-tab" type="button" role="tab" aria-selected="false" aria-disabled="true" disabled title="${copy(lang, "The owner shared the summary only", "Владелец открыл только резюме")}">${copy(lang, "Transcript", "Транскрипт")} <span aria-hidden="true">⌁</span><span class="sr-only">${copy(lang, "Locked", "Закрыт")}</span></button>`}
     </nav>
     <section id="shared-summary" class="meeting-panel" role="tabpanel" aria-labelledby="shared-tab-summary" data-meeting-panel="summary">
       <div class="summary-layout">${summaryDocumentHTML(s, lang, { shared: true })}${meetingRailHTML(s, lang, { shared: true })}</div>
     </section>
-    <section id="shared-transcript" class="meeting-panel" role="tabpanel" aria-labelledby="shared-tab-transcript" data-meeting-panel="transcript" hidden>
+    ${fullAccess ? `<section id="shared-transcript" class="meeting-panel" role="tabpanel" aria-labelledby="shared-tab-transcript" data-meeting-panel="transcript" hidden>
       ${transcriptPanelHTML(turns, lang, { searchable: false })}
-    </section>
+    </section>` : ""}
   </div>`;
 
   const setTab = (name) => {
@@ -627,7 +765,7 @@ async function sharedView(token) {
   });
   $("#shared-copy-summary")?.addEventListener("click", () => copyText(
     summaryMarkdown(s, lang), lang, copy(lang, "Summary copied", "Резюме скопировано")));
-  view.addEventListener("click", (e) => {
+  if (fullAccess) view.addEventListener("click", (e) => {
     const jump = e.target.closest("[data-jump-ms]");
     const moment = jump || e.target.closest("[data-ms]");
     if (!moment) return;
@@ -637,11 +775,13 @@ async function sharedView(token) {
     if (jump) setTimeout(() => sync.els[findSegment(ms)]?.scrollIntoView({ block: "center" }), 50);
   });
 
-  if (tracks.length) {
+  if (fullAccess && tracks.length) {
     player.audioBase = `/api/shared/${token}/audio`;
     player.load(s.id, tracks);
+  } else {
+    player.unload();
   }
-  sync.segments = s.segments;
+  sync.segments = fullAccess ? (s.segments || []) : [];
   sync.els = [...view.querySelectorAll(".seg")].sort((a, b) => a.dataset.idx - b.dataset.idx);
   sync.durationMs = durationMs;
   setTab("summary");
@@ -978,23 +1118,20 @@ async function meetingView(id, gen, prefetched = null) {
 
   api(`/api/sessions/${encodeURIComponent(s.id)}/share`).then(({ token }) => {
     if (token) $("#btn-unshare").classList.remove("hidden");
-  });
-  $("#btn-share").addEventListener("click", async () => {
-    const button = $("#btn-share");
-    const { url } = await post(`/api/sessions/${encodeURIComponent(s.id)}/share?lang=${lang}`);
-    $("#btn-unshare").classList.remove("hidden");
-    try {
-      await navigator.clipboard.writeText(url);
-      button.textContent = copy(lang, "Copied ✓", "Скопировано ✓");
-      setTimeout(() => { button.textContent = copy(lang, "Share", "Поделиться"); }, 2500);
-    } catch {
-      prompt(copy(lang, "Copy the link:", "Скопируйте ссылку:"), url);
-    }
-  });
+  }).catch(() => {});
+  $("#btn-share").addEventListener("click", () => openShareDialog(s, lang));
   $("#btn-unshare").addEventListener("click", async () => {
-    await api(`/api/sessions/${encodeURIComponent(s.id)}/share`, { method: "DELETE" });
-    $("#btn-unshare").classList.add("hidden");
-    meetingMenu.classList.add("hidden");
+    if (!confirm(copy(lang,
+      "Revoke this link now? Anyone using it will lose access.",
+      "Отозвать ссылку? Все, у кого она есть, сразу потеряют доступ."))) return;
+    try {
+      await api(`/api/sessions/${encodeURIComponent(s.id)}/share`, { method: "DELETE" });
+      $("#btn-unshare").classList.add("hidden");
+      meetingMenu.classList.add("hidden");
+      showToast(copy(lang, "Share link revoked", "Ссылка отозвана"));
+    } catch (err) {
+      showToast(copy(lang, `Couldn't revoke link: ${err.message}`, `Не удалось отозвать ссылку: ${err.message}`));
+    }
   });
   $("#btn-del").addEventListener("click", async () => {
     if (!confirm(`Delete "${s.title || s.id}" from the dashboard? The original stays on the Mac.`)) return;

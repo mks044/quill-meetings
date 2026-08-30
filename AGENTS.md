@@ -149,8 +149,9 @@ Tell the operator, in their words:
   before replacing owner edits.
 - **Ask**: use the meeting's **Ask** tab, or the workspace **Ask** view to query
   every meeting at once.
-- **Share**: opens a read-only link for one meeting — no account needed on the
-  other end, revocable with **Unshare**.
+- **Share**: opens a scope picker. **Summary only** is the safe default and never
+  sends transcript/audio; **Full meeting** is an explicit grant of both to
+  anyone holding the read-only link. Either scope is revocable with **Unshare**.
 - **Language**: the EN/RU toggle translates notes on demand and remembers the
   choice. The generation language is `SUMMARY_LANGUAGE` in `dashboard/.env`.
 - **Backups**: everything lives in `~/quill-data/` on the server (recordings +

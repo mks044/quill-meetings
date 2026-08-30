@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS share_tokens (
     token TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     lang TEXT NOT NULL DEFAULT 'en',
+    access_level TEXT NOT NULL DEFAULT 'summary',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -128,6 +129,16 @@ def init() -> None:
                 conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass
+        # Preserve the behavior of links that were already sent before scoped
+        # sharing existed. New databases/defaults and all application inserts
+        # are summary-only; only rows present during this one-time ALTER become
+        # full-access for backwards compatibility.
+        try:
+            conn.execute("ALTER TABLE share_tokens ADD COLUMN access_level TEXT")
+            conn.execute(
+                "UPDATE share_tokens SET access_level='full' WHERE access_level IS NULL")
+        except sqlite3.OperationalError:
+            pass
 
 
 @contextmanager

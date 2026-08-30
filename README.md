@@ -41,9 +41,9 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
 - **Search** — full-text over every word ever spoken, jumping to the moment.
 - **Multilingual** — Whisper handles ~100 languages and mixed-language calls;
   notes generate in your working language with an on-demand translation toggle.
-- **Share links** — read-only page for a single meeting, no account needed on
-  the other end, revocable in one click; recipients can copy the summary but
-  cannot edit the owner's note.
+- **Share links** — read-only and revocable, with **Summary only** as the safe
+  default. The owner must explicitly choose **Full meeting** before an anonymous
+  link can expose the transcript or audio; recipients can never edit the note.
 
 ## How it fits together
 
