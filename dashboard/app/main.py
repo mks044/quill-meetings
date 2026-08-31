@@ -494,6 +494,7 @@ def delete_session(session_id: str):
             raise HTTPException(404, "unknown session")
         conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
         conn.execute("DELETE FROM segments_fts WHERE session_id=?", (session_id,))
+        conn.execute("DELETE FROM owner_notes_fts WHERE session_id=?", (session_id,))
         conn.execute("INSERT OR IGNORE INTO deleted_sessions (id) VALUES (?)", (session_id,))
         conn.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
     sdir = config.SESSIONS_DIR / session_id
@@ -850,12 +851,26 @@ def search(q: str):
     q = q.strip()
     if not q:
         return {"results": []}
+    if len(q) > 500:
+        raise HTTPException(422, "search query is limited to 500 characters")
     # FTS5 phrase-safe query: quote each term.
-    fts_q = " ".join(f'"{t}"' for t in re.findall(r"\w+", q))
+    terms = re.findall(r"\w+", q)
+    if len(terms) > 32:
+        raise HTTPException(422, "search query is limited to 32 terms")
+    fts_q = " ".join(f'"{term}"' for term in terms)
     if not fts_q:
         return {"results": []}
     with db.closing_conn() as conn:
-        rows = conn.execute(
+        note_rows = conn.execute(
+            """SELECT n.session_id,
+                      snippet(owner_notes_fts, 0, char(1), char(2), '…', 18) AS snip,
+                      s.title, s.started_at
+               FROM owner_notes_fts n
+               JOIN sessions s ON s.id = n.session_id
+               WHERE owner_notes_fts MATCH ?
+               ORDER BY s.started_at DESC
+               LIMIT 50""", (fts_q,)).fetchall()
+        transcript_rows = conn.execute(
             """SELECT f.session_id, f.idx,
                       snippet(segments_fts, 0, char(1), char(2), '…', 12) AS snip,
                       seg.start_ms, seg.speaker,
@@ -867,13 +882,15 @@ def search(q: str):
                WHERE segments_fts MATCH ?
                ORDER BY s.started_at DESC, f.idx
                LIMIT 100""", (fts_q,)).fetchall()
-    results = [dict(r) for r in rows]
-    for result in results:
+    notes = [{"kind": "owner_note", **dict(row)} for row in note_rows]
+    transcripts = [{"kind": "transcript", **dict(row)}
+                   for row in transcript_rows]
+    for result in transcripts:
         result["speaker_me_label"] = db.stored_speaker_label(
             result["speaker_me_label"])
         result["speaker_them_label"] = db.stored_speaker_label(
             result["speaker_them_label"])
-    return {"results": results}
+    return {"results": notes + transcripts}
 
 
 # ---------------------------------------------------------------- actions

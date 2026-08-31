@@ -1,5 +1,5 @@
 """SQLite storage. One connection per request (FastAPI dependency), WAL mode,
-FTS5 index over segment text + session titles/overviews for global search."""
+and separate FTS5 indexes for immutable transcript text and private notebooks."""
 
 import hashlib
 import json
@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS segments (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
     text, session_id UNINDEXED, idx UNINDEXED,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS owner_notes_fts USING fts5(
+    text, session_id UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
@@ -153,6 +158,16 @@ def init() -> None:
                 "UPDATE share_tokens SET access_level='full' WHERE access_level IS NULL")
         except sqlite3.OperationalError:
             pass
+
+        # The notebook is canonical in ``sessions``; this private search index
+        # is derived and intentionally separate from immutable transcript FTS.
+        # Rebuild on startup so an interrupted save or version transition can
+        # never leave owner search silently stale.
+        conn.execute("DELETE FROM owner_notes_fts")
+        conn.execute(
+            """INSERT INTO owner_notes_fts (text,session_id)
+               SELECT owner_notes_md,id FROM sessions
+               WHERE owner_notes_md IS NOT NULL AND length(owner_notes_md) > 0""")
 
 
 @contextmanager
@@ -343,6 +358,12 @@ def save_owner_notes(conn, session_id: str, markdown: str | None,
              AND NOT (owner_notes_md IS ?)""",
         (markdown, markdown, session_id, expected_revision, markdown))
     if cur.rowcount:
+        conn.execute(
+            "DELETE FROM owner_notes_fts WHERE session_id=?", (session_id,))
+        if markdown:
+            conn.execute(
+                "INSERT INTO owner_notes_fts (text,session_id) VALUES (?,?)",
+                (markdown, session_id))
         return "saved"
     row = conn.execute(
         """SELECT owner_notes_md,owner_notes_revision FROM sessions

@@ -1230,9 +1230,19 @@ function setNav(name) {
 }
 
 let navGen = 0;
+function syncSearchChrome(lang) {
+  const label = copy(lang,
+    "Search private notes and transcripts",
+    "Поиск по личным заметкам и транскриптам");
+  $(".top-search")?.setAttribute("aria-label", label);
+  $("#global-search")?.setAttribute("placeholder", `${label}…`);
+}
+
 async function route() {
   const gen = ++navGen;
   const h = location.hash || "#/";
+  const uiLang = localStorage.getItem("quill_lang") || "en";
+  syncSearchChrome(uiLang);
   sync.segments = []; sync.els = []; sync.activeIdx = -1; sync.visible = false; resetFollow();
   const render = (fn) => async (...a) => { const html = await fn(...a); return html; };
   try {
@@ -1255,6 +1265,7 @@ async function libraryView(gen) {
   setNav("library");
   const { sessions } = await api("/api/sessions");
   if (stale(gen)) return;
+  const lang = localStorage.getItem("quill_lang") || "en";
   const tags = [...new Set(sessions.flatMap((s) => s.tags || []))];
   if (!sessions.length) {
     view.innerHTML = `<div class="empty-state">
@@ -1265,11 +1276,21 @@ async function libraryView(gen) {
   view.innerHTML = `
     <div class="lib-head"><h1>Meetings</h1>
       <span class="lib-count">${sessions.length} recorded</span></div>
+    <form class="mobile-search" id="mobile-search">
+      <label class="sr-only" for="mobile-search-input">${copy(lang, "Search private notes and transcripts", "Поиск по личным заметкам и транскриптам")}</label>
+      <input id="mobile-search-input" type="search" maxlength="500" placeholder="${copy(lang, "Search notes and transcripts…", "Искать заметки и транскрипты…")}" autocomplete="off">
+      <button aria-label="${copy(lang, "Search", "Найти")}">→</button>
+    </form>
     ${tags.length ? `<div class="tag-row">
       <button class="tag-chip ${!libTag ? "active" : ""}" data-tag="">All</button>
       ${tags.map((t) => `<button class="tag-chip ${libTag === t ? "active" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}
     </div>` : ""}
     <div id="cards"></div>`;
+  $("#mobile-search")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = $("#mobile-search-input").value.trim();
+    if (value) location.hash = `#/search/${encodeURIComponent(value)}`;
+  });
   $(".tag-row")?.addEventListener("click", (e) => {
     const b = e.target.closest("[data-tag]");
     if (b) { libTag = b.dataset.tag; libraryView(); }
@@ -1646,6 +1667,7 @@ async function meetingView(id, gen, prefetched = null) {
     } catch (err) {
       alert("Перевод не удался: " + err.message);
       localStorage.setItem("quill_lang", "en");
+      syncSearchChrome("en");
       return false;
     } finally {
       button.textContent = original;
@@ -1661,6 +1683,7 @@ async function meetingView(id, gen, prefetched = null) {
     if (!button) return;
     const want = button.dataset.lang;
     localStorage.setItem("quill_lang", want);
+    syncSearchChrome(want);
     if (want === "ru" && !s.lang_ready.ru) {
       if (await runTranslate(button)) rerenderIfHere();
       return;
@@ -1805,20 +1828,61 @@ function wireTranscriptSearch() {
 
 // ---------------------------------------------------------------- search page
 
+function resultCountText(count, lang) {
+  if (lang !== "ru") return `${count} result${count === 1 ? "" : "s"}`;
+  const mod10 = count % 10, mod100 = count % 100;
+  const noun = mod10 === 1 && mod100 !== 11 ? "результат"
+    : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) ? "результата"
+      : "результатов";
+  return `${count} ${noun}`;
+}
+
+function highlightedSearchSnippet(value) {
+  return esc(String(value || ""))
+    .replace(/\u0001/g, "<mark>").replace(/\u0002/g, "</mark>");
+}
+
 async function searchView(q, gen) {
   setNav("");
   $("#global-search").value = q;
   const { results } = await api(`/api/search?q=${encodeURIComponent(q)}`);
   if (stale(gen)) return;
   const lang = localStorage.getItem("quill_lang") || "en";
-  view.innerHTML = `<h1 class="page-title">“${esc(q)}” — ${results.length} moment${results.length === 1 ? "" : "s"}</h1>
-    ${results.map((r) => `
-      <a class="sr-row" href="#/m/${encodeURIComponent(r.session_id)}?t=${r.start_ms}">
-        <div class="sr-meta">${esc(r.title || r.session_id)} · ${dateParts(r.started_at).day} · <span class="ts">${fmt(r.start_ms)}</span> · ${esc(speakerLabel({ speaker_labels: {
-          me: r.speaker_me_label, them: r.speaker_them_label,
-        } }, r.speaker === "me" ? "me" : "them", lang))}</div>
-        <div class="sr-text">${esc(r.snip).replace(/\u0001/g, "<mark>").replace(/\u0002/g, "</mark>")}</div>
-      </a>`).join("") || `<div class="empty-state"><div class="big">Nothing found</div><div>Try another word — search covers every transcript.</div></div>`}`;
+  const noteResults = results.filter((result) => result.kind === "owner_note");
+  const transcriptResults = results.filter((result) => result.kind !== "owner_note");
+  const noteRows = noteResults.map((r) => `
+    <a class="sr-row note" href="#/m/${encodeURIComponent(r.session_id)}?tab=notes">
+      <div class="sr-meta"><span class="sr-kind private">${copy(lang, "Private note", "Личная заметка")}</span><span>${esc(r.title || r.session_id)} · ${dateParts(r.started_at).day}</span></div>
+      <div class="sr-text">${highlightedSearchSnippet(r.snip)}</div>
+    </a>`).join("");
+  const transcriptRows = transcriptResults.map((r) => `
+    <a class="sr-row" href="#/m/${encodeURIComponent(r.session_id)}?tab=transcript&t=${r.start_ms}">
+      <div class="sr-meta"><span class="sr-kind">${copy(lang, "Transcript", "Транскрипт")}</span><span>${esc(r.title || r.session_id)} · ${dateParts(r.started_at).day} · <span class="ts">${fmt(r.start_ms)}</span> · ${esc(speakerLabel({ speaker_labels: {
+        me: r.speaker_me_label, them: r.speaker_them_label,
+      } }, r.speaker === "me" ? "me" : "them", lang))}</span></div>
+      <div class="sr-text">${highlightedSearchSnippet(r.snip)}</div>
+    </a>`).join("");
+  const group = (title, rows, count) => rows ? `<section class="sr-section">
+    <h2>${title}<span>${count}</span></h2>${rows}</section>` : "";
+  view.innerHTML = `<div class="search-head">
+      <div><div class="section-kicker">${copy(lang, "Search", "Поиск")}</div><h1>“${esc(q)}”</h1></div>
+      <span class="search-count">${resultCountText(results.length, lang)}</span>
+    </div>
+    <form class="search-page-form" id="search-page-form">
+      <label class="sr-only" for="search-page-input">${copy(lang, "Search private notes and transcripts", "Поиск по личным заметкам и транскриптам")}</label>
+      <input id="search-page-input" type="search" maxlength="500" value="${esc(q)}" autocomplete="off">
+      <button aria-label="${copy(lang, "Search", "Найти")}">→</button>
+    </form>
+    ${results.length ? `${group(copy(lang, "My notes", "Мои заметки"), noteRows, noteResults.length)}
+      ${group(copy(lang, "Transcript", "Транскрипт"), transcriptRows, transcriptResults.length)}`
+      : `<div class="empty-state"><div class="big">${copy(lang, "Nothing found", "Ничего не найдено")}</div><div>${copy(lang,
+        "Try another phrase — search covers private notes and transcripts.",
+        "Попробуйте другую фразу — поиск охватывает личные заметки и транскрипты.")}</div></div>`}`;
+  $("#search-page-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = $("#search-page-input").value.trim();
+    if (value) location.hash = `#/search/${encodeURIComponent(value)}`;
+  });
 }
 
 // ---------------------------------------------------------------- actions page

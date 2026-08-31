@@ -199,6 +199,9 @@ class RetryPersistenceTests(unittest.TestCase):
                 "PRAGMA table_info(artifacts_lang)")}
             session_columns = {row["name"] for row in conn.execute(
                 "PRAGMA table_info(sessions)")}
+            private_search = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='owner_notes_fts'"
+            ).fetchone()
         self.assertIn("summary_json", translated_columns)
         self.assertIn("notes_edited_at", translated_columns)
         self.assertIn("notes_edited_at", session_columns)
@@ -207,6 +210,7 @@ class RetryPersistenceTests(unittest.TestCase):
         self.assertIn("owner_notes_md", session_columns)
         self.assertIn("owner_notes_revision", session_columns)
         self.assertIn("owner_notes_edited_at", session_columns)
+        self.assertIsNotNone(private_search)
         self.assertIn("speaker_me_label", session_columns)
         self.assertIn("speaker_them_label", session_columns)
         self.assertIn("speakers_revision", session_columns)

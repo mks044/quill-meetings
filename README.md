@@ -44,7 +44,8 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
   items with owners and timestamps. Generated on arrival.
 - **Action items** — checkable, aggregated across every meeting on one page.
 - **Ask** — chat about one meeting, or across the whole archive.
-- **Search** — full-text over every word ever spoken, jumping to the moment.
+- **Search** — owner-only full-text across private **My notes** and every word
+  spoken, with note-tab and exact-moment links kept as distinct result types.
 - **Multilingual** — Whisper handles ~100 languages and mixed-language calls;
   notes generate in your working language with an on-demand translation toggle.
 - **Share links** — read-only and revocable, with **Summary only** as the safe

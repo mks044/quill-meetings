@@ -178,6 +178,11 @@ Tell the operator, in their words:
   Autosave uses an optimistic revision: a stale browser gets 409 and must copy
   its draft or deliberately reload. `owner_notes_md` is never projected into
   either anonymous share DTO, including Full meeting links.
+- Global search is owner-authenticated and keeps notebook text in
+  `owner_notes_fts`, separate from immutable transcript `segments_fts`. A
+  successful note save updates that derived row transactionally; startup
+  rebuilds it from canonical sessions. Note hits link to **My notes** and never
+  appear in shared payloads or transcript/Ask retrieval.
 - A provisional `meta.json` is written when capture starts and atomically
   finalized on stop. A hard power loss therefore remains discoverable by the
   next-launch recovery scan; CAF does not need a finalization pass. Dashboard

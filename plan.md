@@ -623,3 +623,108 @@ Full link still contains no owner-notes key, verify all prior hashes and share
 tokens are unchanged, then check queues, service journal, served asset hashes,
 and SQLite integrity. Rollback ignores the three columns; no recording,
 transcript, generated note, action, speaker label, or share state is rewritten.
+
+---
+
+# Section 6 — private-note discovery in global search
+
+## Why this is next
+
+The private notebook is only useful across time if the owner can find what they
+wrote. Quill's global search currently promises every spoken word but returns
+only timestamped transcript segments. A note such as “ask Drew about treasury
+before Tuesday” disappears unless the owner remembers which meeting contains
+it. Search should cover **My notes** without collapsing private writing into the
+immutable transcript or broadening any guest surface.
+
+This remains a focused retrieval improvement, not a new AI feature. Generated
+summary search, semantic ranking, calendar integration, and Ask access to the
+private notebook remain separate decisions.
+
+## Product contract
+
+The authenticated global search returns two explicit result types:
+
+- **My notes** — at most one result per meeting, linked directly to that
+  meeting's My notes tab;
+- **Transcript** — the existing timestamped moment, linked to the exact audio
+  and transcript position.
+
+Results are grouped under localized headings rather than mixing an owner's
+private thought with a spoken quote. The page title reports total results, not
+“moments.” Each private-note row carries a clear **Private note** label and no
+speaker or timestamp; transcript rows retain timestamp and effective voice
+name. Matching terms remain highlighted. Empty state and the global input
+explain that search covers private notes and transcripts; this section does not
+imply title or generated-summary search.
+
+The same quoted-term FTS semantics apply to both sources: punctuation-only and
+blank queries return no results, Unicode EN/RU terms work, and all normalized
+terms must match within one note or one transcript segment. Results are capped
+independently so a long call cannot crowd the owner's notebook out of the page.
+
+## Storage, update, and privacy boundaries
+
+Add a separate `owner_notes_fts` FTS5 table with `text` and an unindexed
+`session_id`. Do not place notebook rows into `segments_fts`: transcript index
+invariants, segment joins, timestamps, and Ask retrieval must remain unchanged.
+
+`db.init()` rebuilds this derived index from non-empty canonical
+`sessions.owner_notes_md` values. This repairs a missing/stale index after an
+unclean shutdown or version transition without rewriting the notes themselves.
+Each successful notebook change updates its one index row in the same SQLite
+transaction; idempotent saves do no index work, clearing removes the row, and
+meeting deletion removes it explicitly. Processing rows are indexed exactly
+like completed meetings.
+
+`GET /api/search` remains behind the owner password middleware. It returns a
+typed allow-list payload; note results contain only session id, title, date,
+highlighted snippet, and `kind: owner_note`. They never contain the full note,
+revision, edit timestamp, transcript fields, or speaker labels. Existing
+`/api/shared/*` builders and summary/full tokens do not query the index, and
+there is no anonymous search route. Queries are bounded to 500 characters and
+32 word terms before reaching FTS5.
+
+## Frontend composition
+
+- Preserve the current search route and navigation model.
+- Keep a compact search form reachable in the mobile library and result page
+  because the desktop sidebar search collapses below 460 px.
+- A note hit navigates to `#/m/{id}?tab=notes`; a transcript hit preserves the
+  existing exact-moment behavior.
+- EN/RU headings, counts, labels, placeholders, and empty states follow the
+  saved UI language. Search content is never translated.
+- Render only escaped server snippets, then convert the two FTS highlight
+  sentinels into `<mark>` tags as the transcript result already does.
+- Desktop and mobile use the existing calm result-card visual, with a compact
+  source pill and separate groups rather than another filter toolbar.
+
+## Files
+
+- `dashboard/app/db.py` — derived private-note FTS table, startup repair, atomic
+  save/delete maintenance
+- `dashboard/app/main.py` — independently capped, typed private/transcript
+  result projections
+- `dashboard/static/index.html`, `app.js`, `style.css` — inclusive search copy,
+  localized grouped results, and note-tab deep links
+- `dashboard/test_owner_notes.py`, `dashboard/test_reliability.py` — Unicode
+  retrieval, update/clear/delete, migration repair, typed projections, and
+  immutable transcript-index/privacy boundaries
+- `README.md`, `AGENTS.md`, `status.md` — exact owner-only search behavior
+
+## Verification and rollback
+
+Use an isolated real-shaped database to test EN/RU Markdown, edits replacing
+old terms, clearing and deletion, a processing note, startup index repair,
+punctuation-only input, transcript results and voice labels, result caps, and
+that `segments_fts` never receives notebook text. Browser-test desktop/mobile
+grouping, highlighting, note and timestamp deep links, language copy, empty
+state, keyboard submission, and a marker absent from both share scopes.
+
+Production starts with six empty notebooks, so the derived index should contain
+zero rows. Back up SQLite before deployment, compare all canonical tables with
+the backup, and use an invalid/stale write only. Verify the new index is empty,
+the existing Full share still omits private-note fields, public static assets
+match, queues are empty, the service journal is clean, and integrity is `ok`.
+Rollback can ignore or drop the derived FTS table; canonical notebook,
+recording, transcript, AI artifact, action, voice, and share data are unchanged.
