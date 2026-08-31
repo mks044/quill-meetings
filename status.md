@@ -1,5 +1,44 @@
 # Project status
 
+## Shipped 2026-08-31 — owner-assigned voice names
+
+Each processed meeting now has an optional **Name voices** editor in Transcript.
+The owner can label the Mac microphone and the call's system-audio side using
+short sample quotes for orientation; blank values restore localized **Me /
+Guest** defaults. Quill remains honest about its recorder model: these are two
+audio-source labels, not person-level diarization, so a group call should use a
+collective other-side name such as “Team.”
+
+Names are meeting metadata over the immutable transcript. They propagate to the
+private/full-share transcript, mic/system player controls, search results, the
+summary Voices rail, full Markdown export, meeting Ask, global Ask, and future
+summary regeneration. Existing notes are never silently rewritten. Optimistic
+revisions reject a stale naming dialog, and AI output generated while names
+change is discarded and rescheduled against the new mapping.
+
+Summary-only shares receive only the two display names and explicitly disclose
+that fact; they still do not query or serialize transcript/audio. Shared viewers
+have no naming controls. Stored labels are normalized, bounded, escaped for HTML
+and Markdown, and fail back to source-role names if database content is invalid.
+
+### Verification
+
+- Twenty-five dashboard tests cover migration, set/reset, Unicode and same-name
+  channels, invalid/corrupt values, stale saves, immutable segment/note state,
+  AI race rejection, long-call chunk context, search, Ask, and strict
+  summary/full DTOs. The sync-agent test and shell sync regression also pass.
+- Isolated real-browser checks cover desktop/mobile EN/RU editing, sample
+  quotes, player/transcript/Voices propagation, full Markdown (including escaped
+  punctuation), search, reset, two-window conflicts, and read-only summary/full
+  guest views.
+- Live at `75e74bc`: the additive migration followed an integrity-checked SQLite
+  backup. All six existing meetings remain unnamed at revision zero; hashes for
+  sessions, 6,916 segments, 40 actions, both RU artifacts, all tokens, deleted
+  rows, and chat history are unchanged. The existing Full share remains Full.
+- Production rejected a stale PATCH with 409 and no mutation. SQLite integrity
+  is `ok`, all six meetings are done, queues are empty, the service is active,
+  served asset hashes match the release, and the service journal is clean.
+
 ## Shipped 2026-08-30 — privacy-tiered sharing
 
 New anonymous links now default to **Summary only**. Their allow-list payload
