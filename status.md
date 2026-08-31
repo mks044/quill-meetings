@@ -1,5 +1,44 @@
 # Project status
 
+## Shipped 2026-08-31 — private notes in global search
+
+Authenticated global search now finds the owner's **My notes** alongside the
+immutable transcript while keeping them as visibly separate result types.
+Private-note hits open the meeting's notebook tab; transcript hits retain their
+speaker, timestamp, and exact audio position. EN/RU headings, result counts,
+empty states, source pills, highlights, and the global search label follow the
+saved UI language. Compact search forms keep the flow reachable when the
+desktop sidebar collapses on mobile.
+
+Notebook text lives in a dedicated derived FTS5 index rather than transcript
+FTS. Successful save/clear/delete operations update it transactionally, and
+startup rebuilds it from canonical session notes to repair any stale index.
+Queries are bounded before FTS execution. Search stays owner-password gated;
+anonymous Summary and Full share paths, meeting/global Ask, and transcript
+retrieval never query or receive the private index.
+
+### Verification
+
+- Thirty-two dashboard tests cover Unicode and mixed note/transcript results,
+  typed allow-list payloads, edit/clear/delete maintenance, processing notes,
+  startup repair, query bounds, migration, immutable transcript FTS, and share
+  privacy. The sync-agent test, shell sync regression, nine Swift recorder
+  tests, and JavaScript/Python syntax checks also pass.
+- Real-data browser checks cover EN/RU groups and live language switching,
+  highlighting, note and exact-moment deep links, localized empty state, mobile
+  entry contracts, clear-to-index removal, and both guest scopes with no
+  console errors.
+- Live at `53b89d1` after an integrity-checked backup at
+  `/home/max/quill-data/backups/quill-before-private-search-20260831T103632Z.db`.
+  The production private index contains zero rows because all six notebooks are
+  empty; exact backup comparisons show zero changes to every canonical table
+  and the 6,916-row transcript index.
+- Production rejected a stale notebook write with 409 and no mutation, returned
+  only typed transcript results for an existing query, and kept the existing
+  Full share free of private-note fields. Anonymous search returns 401, SQLite
+  integrity is `ok`, queues are empty, service/public health is green, served
+  asset hashes match, and the journal is clean.
+
 ## Shipped 2026-08-31 — private meeting notebook
 
 Every meeting now has a dedicated **My notes** tab between Summary and
