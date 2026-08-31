@@ -73,6 +73,12 @@ function md(src) {
 
 const copy = (lang, en, ru) => lang === "ru" ? ru : en;
 
+function speakerLabel(s, role, lang) {
+  const value = String((s?.speaker_labels || {})[role] || "").trim();
+  if (value) return value;
+  return role === "me" ? copy(lang, "Me", "Я") : copy(lang, "Guest", "Собеседник");
+}
+
 function overviewLead(src, max = 420) {
   const lines = String(src || "").split("\n").map((line) => line.trim());
   const bullets = lines.filter((line) => /^[-*]\s/.test(line))
@@ -100,6 +106,7 @@ function summaryModel(s) {
 }
 
 const mdLine = (value) => String(value || "").replace(/\s*\n\s*/g, " ").trim();
+const mdInline = (value) => mdLine(value).replace(/([\\`*_{}\[\]<>])/g, "\\$1");
 
 function summaryMarkdown(s, lang) {
   const summary = summaryModel(s);
@@ -136,8 +143,8 @@ function summaryMarkdown(s, lang) {
 function fullMeetingMarkdown(s, lang) {
   const lines = [summaryMarkdown(s, lang).trim(), "", `## ${copy(lang, "Transcript", "Транскрипт")}`, ""];
   for (const segment of s.segments || []) {
-    const speaker = segment.speaker === "me" ? copy(lang, "Me", "Я") : copy(lang, "Guest", "Собеседник");
-    lines.push(`[${fmt(segment.start_ms)}] **${speaker}:** ${mdLine(segment.text)}`);
+    const speaker = speakerLabel(s, segment.speaker === "me" ? "me" : "them", lang);
+    lines.push(`[${fmt(segment.start_ms)}] **${mdInline(speaker)}:** ${mdLine(segment.text)}`);
   }
   return lines.join("\n").trim() + "\n";
 }
@@ -318,6 +325,149 @@ function openNotesEditor(s, lang, onSaved) {
   $("#edit-title", backdrop).focus();
 }
 
+function speakerSamples(s, role) {
+  const samples = [];
+  for (const segment of s.segments || []) {
+    const segmentRole = segment.speaker === "me" ? "me" : "them";
+    if (segmentRole !== role) continue;
+    const raw = String(segment.text || "").replace(/\s+/g, " ").trim();
+    if (!raw) continue;
+    const text = raw.length > 138 ? `${raw.slice(0, 135).replace(/\s+\S*$/, "")}…` : raw;
+    samples.push({ text, start: +segment.start_ms || 0 });
+    if (samples.length === 2) break;
+  }
+  return samples;
+}
+
+function openSpeakerEditor(s, lang, onSaved) {
+  $("#speaker-editor-backdrop")?.remove();
+  const labels = s.speaker_labels || {};
+  const initial = {
+    me: String(labels.me || ""),
+    them: String(labels.them || ""),
+  };
+  const sampleHTML = (role) => {
+    const samples = speakerSamples(s, role);
+    return samples.length ? `<div class="voice-samples" id="speaker-${role}-context">
+      <span>${copy(lang, "Heard on this channel", "Слышно на этом канале")}</span>
+      ${samples.map((sample) => `<blockquote><b>${fmt(sample.start)}</b> “${esc(sample.text)}”</blockquote>`).join("")}
+    </div>` : `<p class="voice-no-sample" id="speaker-${role}-context">${copy(lang,
+      "No spoken sample was captured on this channel.",
+      "На этом канале нет примера речи.")}</p>`;
+  };
+  const backdrop = document.createElement("div");
+  backdrop.id = "speaker-editor-backdrop";
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `<div class="speaker-dialog" role="dialog" aria-modal="true" aria-labelledby="speaker-editor-title">
+    <form id="speaker-editor-form">
+      <header class="editor-head">
+        <div><div class="section-kicker">${copy(lang, "Owner-assigned labels", "Имена от владельца")}</div>
+          <h2 id="speaker-editor-title">${copy(lang, "Name the voices", "Назвать голоса")}</h2></div>
+        <button type="button" class="editor-close" aria-label="${copy(lang, "Close voice names", "Закрыть имена голосов")}">×</button>
+      </header>
+      <div class="speaker-dialog-body">
+        <p class="speaker-intro">${copy(lang,
+          "Quill labels its two audio sources. Names change the transcript, player, exports, shares, and future AI context — existing notes stay as written.",
+          "Quill подписывает два источника аудио. Имена изменят транскрипт, плеер, экспорт, ссылки и будущий контекст ИИ — существующие заметки останутся как есть.")}</p>
+        <section class="voice-card me">
+          <div class="voice-card-head"><span class="voice-dot" aria-hidden="true"></span>
+            <div><h3>${copy(lang, "Your microphone", "Ваш микрофон")}</h3>
+              <p>${copy(lang, "The person recorded through the Mac microphone", "Человек, записанный через микрофон Mac")}</p></div></div>
+          <label class="voice-name-field"><span>${copy(lang, "Display name (optional)", "Имя (необязательно)")}</span>
+            <input id="speaker-me" value="${esc(initial.me)}" maxlength="80" autocomplete="off"
+              placeholder="${copy(lang, "e.g. Max", "например, Макс")}" aria-describedby="speaker-me-context"></label>
+          ${sampleHTML("me")}
+        </section>
+        <section class="voice-card them">
+          <div class="voice-card-head"><span class="voice-dot" aria-hidden="true"></span>
+            <div><h3>${copy(lang, "Other side / system audio", "Другая сторона / системный звук")}</h3>
+              <p>${copy(lang, "Everything played by the call app", "Всё, что воспроизводит приложение звонка")}</p></div></div>
+          <label class="voice-name-field"><span>${copy(lang, "Display name (optional)", "Имя (необязательно)")}</span>
+            <input id="speaker-them" value="${esc(initial.them)}" maxlength="80" autocomplete="off"
+              placeholder="${copy(lang, "e.g. Drew or Product team", "например, Дрю или Команда продукта")}" aria-describedby="speaker-them-context speaker-group-note"></label>
+          ${sampleHTML("them")}
+          <p class="voice-group-note" id="speaker-group-note">${copy(lang,
+            "Group call? This channel may contain several people — use a collective name such as “Team.”",
+            "Групповой звонок? Здесь могут быть несколько людей — используйте общее имя, например «Команда».")}</p>
+        </section>
+      </div>
+      <div class="editor-error" id="speaker-editor-error" role="alert"></div>
+      <footer class="editor-foot">
+        <button type="button" class="btn editor-cancel">${copy(lang, "Cancel", "Отмена")}</button>
+        <button type="submit" class="btn primary speaker-save" disabled>${copy(lang, "Save names", "Сохранить имена")}</button>
+      </footer>
+    </form>
+  </div>`;
+  document.body.appendChild(backdrop);
+  document.body.classList.add("modal-open");
+  const form = $("#speaker-editor-form", backdrop);
+  const save = $(".speaker-save", backdrop);
+  const returnFocus = $("#btn-speakers") || document.activeElement;
+  const normalize = (value) => value.replace(/\s+/g, " ").trim();
+  let dirty = false;
+  let saving = false;
+
+  const updateDirty = () => {
+    dirty = normalize($("#speaker-me", backdrop).value) !== normalize(initial.me)
+      || normalize($("#speaker-them", backdrop).value) !== normalize(initial.them);
+    save.disabled = saving || !dirty;
+  };
+  const close = (force = false) => {
+    if (saving) return;
+    if (!force && dirty && !confirm(copy(lang,
+      "Discard your unsaved voice names?", "Отменить несохранённые имена голосов?"))) return;
+    document.removeEventListener("keydown", onKeydown);
+    document.body.classList.remove("modal-open");
+    backdrop.remove();
+    returnFocus?.focus?.();
+  };
+  const onKeydown = (event) => {
+    if (event.key === "Escape") { close(); return; }
+    if (event.key !== "Tab") return;
+    const focusable = [...backdrop.querySelectorAll(
+      'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    )].filter((element) => element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  };
+  document.addEventListener("keydown", onKeydown);
+  form.addEventListener("input", updateDirty);
+  backdrop.addEventListener("click", (event) => { if (event.target === backdrop) close(); });
+  $(".editor-close", backdrop).addEventListener("click", () => close());
+  $(".editor-cancel", backdrop).addEventListener("click", () => close());
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (saving || !dirty) return;
+    saving = true; save.disabled = true;
+    save.textContent = copy(lang, "Saving…", "Сохраняю…");
+    const error = $("#speaker-editor-error", backdrop);
+    error.textContent = "";
+    try {
+      const fresh = await api(`/api/sessions/${encodeURIComponent(s.id)}/speakers?lang=${lang}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: Number(labels.revision || 0),
+          me: $("#speaker-me", backdrop).value,
+          them: $("#speaker-them", backdrop).value,
+        }),
+      });
+      dirty = false; saving = false; close(true);
+      showToast(copy(lang, "Voice names saved", "Имена голосов сохранены"));
+      onSaved(fresh);
+    } catch (err) {
+      saving = false; error.textContent = err.message;
+      save.textContent = copy(lang, "Save names", "Сохранить имена");
+      updateDirty();
+    }
+  });
+  $("#speaker-me", backdrop).focus();
+}
+
 async function openShareDialog(s, lang) {
   let state;
   try { state = await api(`/api/sessions/${encodeURIComponent(s.id)}/share`); }
@@ -346,8 +496,8 @@ async function openShareDialog(s, lang) {
             <input type="radio" name="share-access" value="summary" ${access === "summary" ? "checked" : ""}>
             <span class="share-access-copy"><b>${copy(lang, "Summary only", "Только резюме")}</b>
               <small>${copy(lang,
-                "Notes, decisions, open questions, and actions. Transcript and audio stay private.",
-                "Заметки, решения, вопросы и задачи. Транскрипт и аудио останутся закрыты.")}</small></span>
+                "Notes, decisions, open questions, actions, and assigned voice names. Transcript and audio stay private.",
+                "Заметки, решения, вопросы, задачи и заданные имена голосов. Транскрипт и аудио останутся закрыты.")}</small></span>
             <span class="recommended-pill">${copy(lang, "Recommended", "Рекомендуется")}</span>
           </label>
           <label class="share-access-option full-access">
@@ -486,12 +636,22 @@ function summaryDocumentHTML(s, lang, { shared = false } = {}) {
 
 function meetingRailHTML(s, lang, { shared = false } = {}) {
   const actions = s.actions || [];
+  const voiceLabels = s.speaker_labels || {};
+  const hasVoiceNames = Boolean(String(voiceLabels.me || "").trim()
+    || String(voiceLabels.them || "").trim());
   return `<aside class="meeting-rail">
     <section class="rail-card" id="p-actions">
       <div class="rail-card-head"><h2>${copy(lang, "Action items", "Задачи")}</h2>
         ${actions.length ? `<span>${actions.filter((a) => !a.done).length}</span>` : ""}</div>
       ${actionsHTML(actions, { readonly: shared, lang })}
     </section>
+    ${hasVoiceNames ? `<section class="rail-card voices-card">
+      <div class="rail-card-head"><h2>${copy(lang, "Voices", "Голоса")}</h2></div>
+      <div class="voice-summary-row me"><span class="voice-dot" aria-hidden="true"></span>
+        <div><b>${esc(speakerLabel(s, "me", lang))}</b><small>${copy(lang, "Your microphone", "Ваш микрофон")}</small></div></div>
+      <div class="voice-summary-row them"><span class="voice-dot" aria-hidden="true"></span>
+        <div><b>${esc(speakerLabel(s, "them", lang))}</b><small>${copy(lang, "Other side", "Другая сторона")}</small></div></div>
+    </section>` : ""}
     ${(s.outline || []).length ? `<section class="rail-card">
       <div class="rail-card-head"><h2>${copy(lang, "Timeline", "По ходу встречи")}</h2></div>
       <div class="chapter-list">${s.outline.map((o) => `<button data-jump-ms="${o.ms}">
@@ -504,25 +664,34 @@ function meetingRailHTML(s, lang, { shared = false } = {}) {
   </aside>`;
 }
 
-function transcriptPanelHTML(turns, lang, { searchable = true } = {}) {
+function transcriptPanelHTML(turns, lang, {
+  searchable = true, session = null, nameable = false,
+} = {}) {
+  const named = Boolean(String(session?.speaker_labels?.me || "").trim()
+    || String(session?.speaker_labels?.them || "").trim());
   return `<div class="transcript-panel">
     <div class="tr-toolbar">
       <div><span class="section-kicker">${copy(lang, "Verbatim record", "Дословная запись")}</span>
         <h2>${copy(lang, "Transcript", "Транскрипт")}</h2></div>
+      <div class="tr-tools">
+      ${nameable ? `<button type="button" class="voice-name-button" id="btn-speakers">
+        <span aria-hidden="true">◎</span>${named
+          ? copy(lang, "Rename voices", "Переименовать голоса")
+          : copy(lang, "Name voices", "Назвать голоса")}</button>` : ""}
       ${searchable ? `<div class="tr-search">
         <label><span class="sr-only">${copy(lang, "Find in transcript", "Найти в транскрипте")}</span>
           <input id="tr-q" placeholder="${copy(lang, "Find in transcript", "Найти в транскрипте")}" autocomplete="off"></label>
         <span class="cnt" id="tr-cnt"></span>
         <button id="tr-prev" title="${copy(lang, "Previous result", "Предыдущий результат")}">↑</button>
         <button id="tr-next" title="${copy(lang, "Next result", "Следующий результат")}">↓</button>
-      </div>` : ""}
+      </div>` : ""}</div>
     </div>
     <div class="tr-body">
       ${searchable ? `<div class="time-rail" id="rail"><div class="rail-line"></div><div class="rail-needle" id="rail-needle" style="top:0"></div></div>` : ""}
       <div class="turns" id="turns">
         ${turns.map((t) => `<div class="turn ${t.speaker}">
           <div class="turn-gutter">
-            <span class="turn-speaker">${t.speaker === "me" ? copy(lang, "Me", "Я") : copy(lang, "Guest", "Собеседник")}</span>
+            <span class="turn-speaker">${esc(speakerLabel(session, t.speaker, lang))}</span>
             <button class="turn-ts" data-ms="${t.start}">${fmt(t.start)}</button>
           </div>
           <div class="turn-text">${t.segs.map((g) => `<span class="seg" data-ms="${g.start_ms}" data-idx="${g.idx}">${esc(g.text)}</span>`).join(" ")}</div>
@@ -536,13 +705,25 @@ function transcriptPanelHTML(turns, lang, { searchable = true } = {}) {
 
 const player = {
   sessionId: null, track: null, tracks: [], speed: 1,
+  speakerLabels: {}, lang: "en",
   bar: $("#player-bar"), playBtn: $("#pb-play"), timeEl: $("#pb-time"),
   durEl: $("#pb-dur"), scrub: $("#pb-scrub"), progress: $("#pb-progress"),
   tracksEl: $("#pb-tracks"), speedBtn: $("#pb-speed"),
 
-  load(sessionId, tracks) {
-    if (this.sessionId === sessionId && this.track) return;
-    this.sessionId = sessionId; this.tracks = tracks;
+  load(sessionId, tracks, speakerLabels = {}, lang = "en", audioBase = null) {
+    const sourceChanged = this.sessionId !== sessionId || this.audioBase !== audioBase;
+    this.speakerLabels = speakerLabels || {};
+    this.lang = lang;
+    this.tracks = tracks;
+    this.audioBase = audioBase;
+    if (!sourceChanged && this.track) {
+      if (tracks.includes(this.track)) this.renderTracks();
+      else this.setTrack(
+        tracks.includes("mixed") ? "mixed" : (tracks.includes("system") ? "system" : tracks[0]),
+        false);
+      return;
+    }
+    this.sessionId = sessionId;
     this.setTrack(tracks.includes("mixed") ? "mixed" : (tracks.includes("system") ? "system" : tracks[0]), false);
     this.bar.classList.remove("hidden");
     this.renderTracks();
@@ -560,9 +741,12 @@ const player = {
     this.renderTracks();
   },
   renderTracks() {
+    const labels = { speaker_labels: this.speakerLabels };
     this.tracksEl.innerHTML = this.tracks.map((t) =>
       `<button class="pb-track ${t === this.track ? "active" : ""}" data-track="${t}">
-        ${t === "mixed" ? "Both" : t === "mic" ? "Me (mic)" : "Them (system)"}</button>`).join("");
+        ${t === "mixed" ? copy(this.lang, "Both", "Оба")
+          : t === "mic" ? `${esc(speakerLabel(labels, "me", this.lang))} (mic)`
+          : `${esc(speakerLabel(labels, "them", this.lang))} (system)`}</button>`).join("");
   },
   seek(ms, play = null) {
     if (!this.sessionId) return;
@@ -572,6 +756,7 @@ const player = {
   unload() {
     audio.pause(); audio.removeAttribute("src"); audio.load();
     this.sessionId = null; this.track = null; this.tracks = []; this.audioBase = null;
+    this.speakerLabels = {}; this.lang = "en";
     this.bar.classList.add("hidden");
   },
 };
@@ -744,7 +929,7 @@ async function sharedView(token) {
       <div class="summary-layout">${summaryDocumentHTML(s, lang, { shared: true })}${meetingRailHTML(s, lang, { shared: true })}</div>
     </section>
     ${fullAccess ? `<section id="shared-transcript" class="meeting-panel" role="tabpanel" aria-labelledby="shared-tab-transcript" data-meeting-panel="transcript" hidden>
-      ${transcriptPanelHTML(turns, lang, { searchable: false })}
+      ${transcriptPanelHTML(turns, lang, { searchable: false, session: s })}
     </section>` : ""}
   </div>`;
 
@@ -776,8 +961,7 @@ async function sharedView(token) {
   });
 
   if (fullAccess && tracks.length) {
-    player.audioBase = `/api/shared/${token}/audio`;
-    player.load(s.id, tracks);
+    player.load(s.id, tracks, s.speaker_labels, lang, `/api/shared/${token}/audio`);
   } else {
     player.unload();
   }
@@ -950,7 +1134,7 @@ async function meetingView(id, gen, prefetched = null) {
       <div class="summary-layout">${summaryDocumentHTML(s, lang)}${meetingRailHTML(s, lang)}</div>
     </section>
     <section id="meeting-transcript" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-transcript" data-meeting-panel="transcript">
-      ${transcriptPanelHTML(turns, lang)}
+      ${transcriptPanelHTML(turns, lang, { session: s, nameable: true })}
     </section>
     <section id="meeting-ask" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-ask" data-meeting-panel="ask">
       <div class="ask-meeting">
@@ -1029,7 +1213,7 @@ async function meetingView(id, gen, prefetched = null) {
     e.preventDefault(); next.focus(); next.click();
   });
 
-  if (tracks.length) player.load(s.id, tracks);
+  if (tracks.length) player.load(s.id, tracks, s.speaker_labels, lang);
   else player.unload();
   sync.segments = s.segments;
   sync.els = [...page.querySelectorAll(".seg")].sort((a, b) => a.dataset.idx - b.dataset.idx);
@@ -1102,6 +1286,9 @@ async function meetingView(id, gen, prefetched = null) {
     meetingMenu.classList.add("hidden");
     moreButton.setAttribute("aria-expanded", "false");
     openNotesEditor(s, lang, (fresh) => meetingView(s.id, undefined, fresh));
+  });
+  $("#btn-speakers")?.addEventListener("click", () => {
+    openSpeakerEditor(s, lang, (fresh) => meetingView(s.id, undefined, fresh));
   });
   $("#btn-copy-summary").addEventListener("click", async () => {
     meetingMenu.classList.add("hidden");
@@ -1323,10 +1510,13 @@ async function searchView(q, gen) {
   $("#global-search").value = q;
   const { results } = await api(`/api/search?q=${encodeURIComponent(q)}`);
   if (stale(gen)) return;
+  const lang = localStorage.getItem("quill_lang") || "en";
   view.innerHTML = `<h1 class="page-title">“${esc(q)}” — ${results.length} moment${results.length === 1 ? "" : "s"}</h1>
     ${results.map((r) => `
       <a class="sr-row" href="#/m/${encodeURIComponent(r.session_id)}?t=${r.start_ms}">
-        <div class="sr-meta">${esc(r.title || r.session_id)} · ${dateParts(r.started_at).day} · <span class="ts">${fmt(r.start_ms)}</span> · ${r.speaker === "me" ? "Me" : "Them"}</div>
+        <div class="sr-meta">${esc(r.title || r.session_id)} · ${dateParts(r.started_at).day} · <span class="ts">${fmt(r.start_ms)}</span> · ${esc(speakerLabel({ speaker_labels: {
+          me: r.speaker_me_label, them: r.speaker_them_label,
+        } }, r.speaker === "me" ? "me" : "them", lang))}</div>
         <div class="sr-text">${esc(r.snip).replace(/\u0001/g, "<mark>").replace(/\u0002/g, "</mark>")}</div>
       </a>`).join("") || `<div class="empty-state"><div class="big">Nothing found</div><div>Try another word — search covers every transcript.</div></div>`}`;
 }

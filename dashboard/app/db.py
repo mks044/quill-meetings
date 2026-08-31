@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     artifacts_revision INTEGER NOT NULL DEFAULT 0,
     notes_revision INTEGER NOT NULL DEFAULT 0,
     notes_edited_at TEXT,
+    speaker_me_label TEXT,
+    speaker_them_label TEXT,
+    speakers_revision INTEGER NOT NULL DEFAULT 0,
+    speakers_edited_at TEXT,
     segments_hash TEXT,
     has_audio_mic INTEGER NOT NULL DEFAULT 0,
     has_audio_system INTEGER NOT NULL DEFAULT 0,
@@ -124,6 +128,10 @@ def init() -> None:
             "ALTER TABLE artifacts_lang ADD COLUMN notes_edited_at TEXT",
             "ALTER TABLE sessions ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE artifacts_lang ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN speaker_me_label TEXT",
+            "ALTER TABLE sessions ADD COLUMN speaker_them_label TEXT",
+            "ALTER TABLE sessions ADD COLUMN speakers_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN speakers_edited_at TEXT",
         ):
             try:
                 conn.execute(stmt)
@@ -219,15 +227,22 @@ def segments_hash(segments) -> str:
     return h.hexdigest()
 
 
-def save_ai_artifacts(conn, session_id, art, expected_hash: str | None = None) -> bool:
-    """Persist AI output. With expected_hash, refuse when the transcript moved
-    underneath the run (stale artifacts must never overwrite fresh segments).
+def save_ai_artifacts(conn, session_id, art, expected_hash: str | None = None,
+                      expected_speakers_revision: int | None = None) -> bool:
+    """Persist AI output unless its transcript/voice-name snapshot moved.
+
+    Stale artifacts must never overwrite fresh segments or publish notes built
+    with speaker labels the owner changed while the run was in flight.
     Manual actions survive; AI actions are replaced but carry done-state
     forward by exact text match."""
-    if expected_hash is not None:
+    if expected_hash is not None or expected_speakers_revision is not None:
         cur = conn.execute(
-            "SELECT segments_hash FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if not cur or cur["segments_hash"] != expected_hash:
+            "SELECT segments_hash,speakers_revision FROM sessions WHERE id=?",
+            (session_id,)).fetchone()
+        if (not cur
+                or (expected_hash is not None and cur["segments_hash"] != expected_hash)
+                or (expected_speakers_revision is not None
+                    and cur["speakers_revision"] != expected_speakers_revision)):
             return False
     _save_ai_artifacts(conn, session_id, art)
     return True
@@ -296,10 +311,43 @@ def save_manual_notes(conn, session_id: str, lang: str, title: str,
     return cur.rowcount > 0
 
 
+def save_speaker_labels(conn, session_id: str, me: str | None,
+                        them: str | None, expected_revision: int) -> bool:
+    cur = conn.execute(
+        """UPDATE sessions SET speaker_me_label=?, speaker_them_label=?,
+           speakers_revision=speakers_revision+1,
+           speakers_edited_at=datetime('now')
+           WHERE id=? AND segments_hash IS NOT NULL AND speakers_revision=?""",
+        (me, them, session_id, expected_revision))
+    return cur.rowcount > 0
+
+
+def stored_speaker_label(value) -> str | None:
+    """Return a safe display/context label from SQLite, or the role fallback.
+
+    Writes are validated at the API boundary; this second boundary keeps a
+    manually edited or corrupt dynamic-typed SQLite value out of HTML and AI
+    prompts.
+    """
+    if not isinstance(value, str):
+        return None
+    label = " ".join(value.split())
+    if (not label or len(label) > 80
+            or any(ord(char) < 32 for char in label)):
+        return None
+    return label
+
+
 def session_row_to_dict(row) -> dict:
     d = dict(row)
     for k in ("outline_json", "keywords_json", "tags_json"):
         d[k.replace("_json", "")] = json.loads(d.pop(k) or "[]")
     d["summary"] = json.loads(d.pop("summary_json", None) or "{}")
     d["notes_edited"] = bool(d.pop("notes_edited_at", None))
+    d["speaker_labels"] = {
+        "me": stored_speaker_label(d.pop("speaker_me_label", None)),
+        "them": stored_speaker_label(d.pop("speaker_them_label", None)),
+        "revision": d.pop("speakers_revision", 0),
+        "edited": bool(d.pop("speakers_edited_at", None)),
+    }
     return d

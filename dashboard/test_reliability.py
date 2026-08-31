@@ -204,6 +204,10 @@ class RetryPersistenceTests(unittest.TestCase):
         self.assertIn("notes_edited_at", session_columns)
         self.assertIn("notes_revision", translated_columns)
         self.assertIn("notes_revision", session_columns)
+        self.assertIn("speaker_me_label", session_columns)
+        self.assertIn("speaker_them_label", session_columns)
+        self.assertIn("speakers_revision", session_columns)
+        self.assertIn("speakers_edited_at", session_columns)
 
     def test_share_scope_migration_preserves_old_links_but_new_default_is_summary(self):
         with db.closing_conn() as conn:

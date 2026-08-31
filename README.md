@@ -34,6 +34,9 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
   place, copy the useful summary alone, or copy the full meeting as Markdown.
 - **Transcript on demand** — a secondary tab with speaker-separated turns;
   click a line to hear that moment, follow the audio, or search every word.
+- **Name the voices** — optionally label the microphone and system-audio sides
+  once per meeting. Names carry through the transcript, player, search, Ask,
+  Markdown export, and shares without rewriting the recorded words or notes.
 - **AI notes** — title, readable brief, chapters, keywords, tags, and action
   items with owners and timestamps. Generated on arrival.
 - **Action items** — checkable, aggregated across every meeting on one page.
@@ -44,6 +47,10 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
 - **Share links** — read-only and revocable, with **Summary only** as the safe
   default. The owner must explicitly choose **Full meeting** before an anonymous
   link can expose the transcript or audio; recipients can never edit the note.
+
+Quill separates two audio **sources**, not arbitrary people: `me` is the Mac
+microphone and `them` is the call's system audio. On a group call, the other
+side can contain several voices, so use a collective label such as “Team.”
 
 ## How it fits together
 

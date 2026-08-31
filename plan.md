@@ -379,3 +379,120 @@ link: inspect migration/state, send only invalid no-op requests, verify any
 existing full link remains compatible, compare hashes, logs, queue, and SQLite
 integrity. Rolling back code leaves `access_level` ignored and preserves every
 token; no recording, transcript, note, or action data is rewritten.
+
+---
+
+# Section 4 — owner-assigned voice names
+
+## Why this is next
+
+Quill still renders every recording as generic **Me / Guest** even when the
+same two voices are obvious throughout a 1:1. That weakens transcript scanning,
+Markdown exports, search results, Ask answers, and full-meeting shares. Wispr's
+refined transcript treats real names as a separate owner-controlled identity
+layer and propagates them across reading/export surfaces. Quill cannot honestly
+copy Wispr's multi-speaker diarization: its local recorder deliberately produces
+two source roles, `me` (microphone) and `them` (system audio). The right feature
+is therefore durable names for those two channels, with explicit copy warning
+that “other side” may contain several people.
+
+## Product contract
+
+The private Transcript toolbar gains **Name voices** (or **Rename voices** once
+set). A focused dialog contains two rows:
+
+- **Your microphone** (`me`) with one or two short sample quotes;
+- **Other side / system audio** (`them`) with its own samples and a note that a
+  group call should use a collective label such as “Team,” not one person's
+  name.
+
+Each name is optional. Blank resets that channel to localized **Me / Guest**.
+Names are single-line, whitespace-normalized, at most 80 characters, and may be
+the same (two people can share a name). Saving is optimistic and per meeting: a
+stale dialog returns 409 instead of overwriting a newer assignment.
+
+Assigned names propagate without rewriting immutable segment rows:
+
+- private and full-share transcript turn labels;
+- mic/system player track labels;
+- Copy full meeting Markdown;
+- full-text search result speaker metadata;
+- a compact Voices card in the summary rail (including summary-only shares);
+- meeting and global Ask transcript context;
+- future summary regeneration, so a deliberate regeneration can use the names.
+
+Existing summary/notes text is never silently rewritten when a voice is named.
+That preserves owner edits. If the owner explicitly regenerates notes, the
+existing regeneration warning still applies and the current voice names become
+AI context. Shared viewers remain read-only and never receive naming controls.
+
+## Storage, API, and races
+
+Add nullable `speaker_me_label`, `speaker_them_label`, integer
+`speakers_revision`, and `speakers_edited_at` to `sessions`. The session DTO
+exposes one nested allow-list object:
+
+```json
+{
+  "speaker_labels": {
+    "me": "Max",
+    "them": "Drew",
+    "revision": 2,
+    "edited": true
+  }
+}
+```
+
+`PATCH /api/sessions/{id}/speakers` accepts `expected_revision`, `me`, and
+`them`, validates/normalizes them, atomically increments the revision, and
+returns the fresh private session payload. It requires a transcript but does
+not touch segments, notes, translations, actions, or share scope.
+
+AI generation snapshots `speakers_revision` along with the transcript hash. If
+labels change mid-run, the stale output is discarded and the normal single-
+flight reschedule uses the new labels. Labels do not increment artifact or note
+revisions because they are presentation/context metadata, not generated note
+content.
+
+Strict shared DTOs include only the two display labels (no revision/edit
+metadata). Summary links can show the Voices card but still do not query or send
+segments. Full links use the same labels in transcript/player. Any missing or
+invalid stored label falls back to the localized role name.
+
+## Frontend and AI composition
+
+- Reuse the established modal, focus trap/return, inline error, toast, and
+  mobile bottom-sheet behavior.
+- Sample quotes are escaped, bounded, and read from already-loaded segments;
+  they are context only and never submitted back.
+- Centralize `speakerLabel(session, role, lang)` so transcript, search, player,
+  export, and rail cannot drift to different fallback rules.
+- Extend `ai.transcript_block` with optional role labels. Prompts explicitly
+  retain the semantic mapping “named me-role = operator” so task ownership and
+  citations do not become ambiguous.
+
+## Files
+
+- `dashboard/app/db.py` — additive columns, DTO mapping, atomic speaker save,
+  and AI stale guard
+- `dashboard/app/main.py` — validated PATCH route, search/share projection,
+  and named Ask context
+- `dashboard/app/ai.py`, `dashboard/app/ingest.py` — named transcript blocks and
+  generation snapshot propagation
+- `dashboard/static/app.js`, `style.css` — naming dialog and every display/export
+  consumer
+- `dashboard/test_reliability.py`, `dashboard/test_speaker_labels.py` — storage,
+  validation, races, search/share/AI context
+- `README.md`, `AGENTS.md`, `status.md` — exact two-channel behavior
+
+## Verification and rollback
+
+Use an isolated real-shaped database to test set/reset, stale save, quotes,
+Unicode names, same-name channels, AI stale reschedule guard, private/full/share
+payload differences, named Ask blocks, search metadata, and unchanged segment
+hash/count. Browser-test EN/RU defaults, naming and resetting, transcript/player,
+summary Voices card, full export, summary/full guests, keyboard/mobile layout,
+and error state. Production probes must be invalid/stale only so real meetings
+remain unnamed until the owner chooses; verify schema, payload fallbacks,
+hashes, service logs, queue, and SQLite integrity. Rollback ignores additive
+columns and leaves all canonical transcript/audio/note data unchanged.

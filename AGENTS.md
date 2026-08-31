@@ -147,6 +147,12 @@ Tell the operator, in their words:
   **Copy summary** excludes the transcript, while **Copy full meeting** exports
   everything as Markdown. `••• → Regenerate summary` re-runs the AI and warns
   before replacing owner edits.
+- **Voices**: in **Transcript**, **Name voices** optionally labels the two
+  recorder sources everywhere (transcript, player, search, Ask, export, and
+  shares). `Your microphone` is one source; `Other side / system audio` may be
+  several people on a group call, so give it a collective label. Naming never
+  rewrites the immutable transcript or existing notes; a later explicit
+  regeneration uses the current labels as AI context.
 - **Ask**: use the meeting's **Ask** tab, or the workspace **Ask** view to query
   every meeting at once.
 - **Share**: opens a scope picker. **Summary only** is the safe default and never
@@ -161,6 +167,10 @@ Tell the operator, in their words:
 
 - Audio never leaves the Mac for transcription: Whisper runs on-device. The
   server only receives the finished transcript and audio files.
+- Speaker separation is source-based, not person-level diarization: `me` is
+  microphone audio and `them` is all system audio. Owner-assigned names are
+  revisioned session metadata; stale saves fail instead of overwriting a newer
+  name, and AI results generated against an older name revision are discarded.
 - A provisional `meta.json` is written when capture starts and atomically
   finalized on stop. A hard power loss therefore remains discoverable by the
   next-launch recovery scan; CAF does not need a finalization pass. Dashboard

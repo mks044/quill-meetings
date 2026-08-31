@@ -200,7 +200,9 @@ async def _ai_pipeline(session_id: str) -> None:
                ai_retry_at=NULL, ai_attempts=ai_attempts+1 WHERE id=?""",
             (session_id,))
         session = conn.execute(
-            "SELECT started_at, ai_attempts FROM sessions WHERE id=?", (session_id,)
+            """SELECT started_at, ai_attempts, speaker_me_label,
+                      speaker_them_label, speakers_revision
+               FROM sessions WHERE id=?""", (session_id,)
         ).fetchone()
         if not session:
             return
@@ -209,6 +211,11 @@ async def _ai_pipeline(session_id: str) -> None:
             " WHERE session_id=? ORDER BY idx", (session_id,)).fetchall()
         started_at = session["started_at"]
         attempt = session["ai_attempts"]
+        speaker_labels = {
+            "me": db.stored_speaker_label(session["speaker_me_label"]),
+            "them": db.stored_speaker_label(session["speaker_them_label"]),
+        }
+        speakers_revision = session["speakers_revision"]
     segments = [dict(r) for r in rows]
     run_hash = db.segments_hash(segments)
     if not segments:
@@ -218,13 +225,17 @@ async def _ai_pipeline(session_id: str) -> None:
                 (session_id,))
         return
     try:
-        art = await ai.generate_artifacts(session_id, started_at, segments)
+        art = await ai.generate_artifacts(
+            session_id, started_at, segments, speaker_labels=speaker_labels)
         with db.closing_conn() as conn:
-            saved = db.save_ai_artifacts(conn, session_id, art, expected_hash=run_hash)
+            saved = db.save_ai_artifacts(
+                conn, session_id, art, expected_hash=run_hash,
+                expected_speakers_revision=speakers_revision)
         if saved:
             log.info("AI artifacts done for %s", session_id)
         else:
-            log.info("transcript changed mid-run for %s — rescheduling", session_id)
+            log.info("transcript or speaker names changed mid-run for %s — rescheduling",
+                     session_id)
             asyncio.get_running_loop().call_later(0.1, schedule_ai, session_id)
             return
     except Exception as e:  # noqa: BLE001 — status must always land in the DB

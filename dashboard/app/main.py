@@ -357,6 +357,50 @@ def edit_notes(session_id: str, body: NotesEdit, lang: str = "en"):
     return get_session(session_id, lang=lang)
 
 
+class SpeakerLabelsEdit(BaseModel):
+    expected_revision: int
+    me: str | None = None
+    them: str | None = None
+
+
+def _clean_speaker_label(value: str | None) -> str | None:
+    if value is None:
+        return None
+    label = re.sub(r"\s+", " ", value).strip()
+    if not label:
+        return None
+    if len(label) > 80:
+        raise HTTPException(422, "speaker names are limited to 80 characters")
+    if any(ord(char) < 32 for char in label):
+        raise HTTPException(422, "speaker names cannot contain control characters")
+    return label
+
+
+@app.patch("/api/sessions/{session_id}/speakers")
+def edit_speaker_labels(session_id: str, body: SpeakerLabelsEdit,
+                        lang: str = "en"):
+    if lang not in ("en", "ru"):
+        raise HTTPException(400, "only en and ru are supported")
+    if type(body.expected_revision) is not int or body.expected_revision < 0:
+        raise HTTPException(422, "invalid speakers revision")
+    me = _clean_speaker_label(body.me)
+    them = _clean_speaker_label(body.them)
+    with db.closing_conn() as conn:
+        row = conn.execute(
+            "SELECT segments_hash,speakers_revision FROM sessions WHERE id=?",
+            (session_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown session")
+        if row["segments_hash"] is None:
+            raise HTTPException(409, "local transcription is not ready")
+        if row["speakers_revision"] != body.expected_revision:
+            raise HTTPException(409, "voice names changed in another window — reload and try again")
+        if not db.save_speaker_labels(
+                conn, session_id, me, them, body.expected_revision):
+            raise HTTPException(409, "voice names changed while saving — reload and try again")
+    return get_session(session_id, lang=lang)
+
+
 @app.post("/api/ingest/{session_id}")
 async def ingest_endpoint(session_id: str):
     if not re.fullmatch(r"[\w.\-]+", session_id):
@@ -605,6 +649,10 @@ def shared_payload(token: str, response: Response):
         "started_at": d["started_at"],
         "duration_s": d["duration_s"],
         "overview_md": d.get("overview_md"),
+        "speaker_labels": {
+            "me": (d.get("speaker_labels") or {}).get("me"),
+            "them": (d.get("speaker_labels") or {}).get("them"),
+        },
         "summary": {
             "brief": str((d.get("summary") or {}).get("brief") or ""),
             "decisions": [
@@ -751,14 +799,21 @@ def search(q: str):
             """SELECT f.session_id, f.idx,
                       snippet(segments_fts, 0, char(1), char(2), '…', 12) AS snip,
                       seg.start_ms, seg.speaker,
-                      s.title, s.started_at
+                      s.title, s.started_at,
+                      s.speaker_me_label, s.speaker_them_label
                FROM segments_fts f
                JOIN segments seg ON seg.session_id = f.session_id AND seg.idx = f.idx
                JOIN sessions s ON s.id = f.session_id
                WHERE segments_fts MATCH ?
                ORDER BY s.started_at DESC, f.idx
                LIMIT 100""", (fts_q,)).fetchall()
-    return {"results": [dict(r) for r in rows]}
+    results = [dict(r) for r in rows]
+    for result in results:
+        result["speaker_me_label"] = db.stored_speaker_label(
+            result["speaker_me_label"])
+        result["speaker_them_label"] = db.stored_speaker_label(
+            result["speaker_them_label"])
+    return {"results": results}
 
 
 # ---------------------------------------------------------------- actions
@@ -858,11 +913,18 @@ def _history(conn, scope: str, session_id: str | None):
 @app.post("/api/sessions/{session_id}/chat")
 async def session_chat(session_id: str, body: ChatBody):
     with db.closing_conn() as conn:
+        session = conn.execute(
+            """SELECT speaker_me_label,speaker_them_label FROM sessions
+               WHERE id=?""", (session_id,)).fetchone()
         segs = conn.execute(
             "SELECT speaker, start_ms, end_ms, text FROM segments"
             " WHERE session_id=? ORDER BY idx", (session_id,)).fetchall()
-        if not segs:
+        if not session or not segs:
             raise HTTPException(404, "unknown or empty session")
+        speaker_labels = {
+            "me": db.stored_speaker_label(session["speaker_me_label"]),
+            "them": db.stored_speaker_label(session["speaker_them_label"]),
+        }
     jid = _new_job()
 
     async def run():
@@ -870,7 +932,9 @@ async def session_chat(session_id: str, body: ChatBody):
             async with _scope_lock(f"session:{session_id}"):
                 with db.closing_conn() as conn:
                     history = _history(conn, "session", session_id)
-                answer = await ai.chat_session([dict(s) for s in segs], history, body.question)
+                answer = await ai.chat_session(
+                    [dict(s) for s in segs], history, body.question,
+                    speaker_labels=speaker_labels)
             with db.closing_conn() as conn:
                 conn.execute(
                     "INSERT INTO chat_messages (scope, session_id, role, content) VALUES ('session',?,?,?)",
@@ -932,8 +996,15 @@ async def global_ask(body: ChatBody):
                 segs = conn.execute(
                     "SELECT speaker, start_ms, end_ms, text FROM segments"
                     " WHERE session_id=? ORDER BY idx", (sid,)).fetchall()
-            block = (f"=== Meeting: {srow['title'] or sid} ({srow['started_at']}) ===\n"
-                     + ai.transcript_block([dict(s) for s in segs], max_chars=30_000))
+            speaker_labels = {
+                "me": db.stored_speaker_label(srow["speaker_me_label"]),
+                "them": db.stored_speaker_label(srow["speaker_them_label"]),
+            }
+            block = (
+                f"=== Meeting: {srow['title'] or sid} ({srow['started_at']}) ===\n"
+                + ai.transcript_block(
+                    [dict(s) for s in segs], max_chars=30_000,
+                    speaker_labels=speaker_labels))
             blocks.append(block)
     jid = _new_job()
 

@@ -165,11 +165,25 @@ ARTIFACTS_SCHEMA = {
 }
 
 
-def transcript_block(segments, max_chars: int = 120_000) -> str:
+def _speaker_context(speaker_labels: dict | None) -> str:
+    labels = speaker_labels or {}
+    me = str(labels.get("me") or "me").strip() or "me"
+    them = str(labels.get("them") or "them").strip() or "them"
+    return (f'{json.dumps(me, ensure_ascii=False)} (me role) = the operator '
+            f'on the microphone; {json.dumps(them, ensure_ascii=False)} '
+            f'(them role) = the other/system-audio side of the call')
+
+
+def transcript_block(segments, max_chars: int = 120_000,
+                     speaker_labels: dict | None = None) -> str:
     lines = []
+    labels = speaker_labels or {}
     for s in segments:
         ts = _fmt_ms(s["start_ms"])
-        lines.append(f"[{ts}] {s['speaker']}: {s['text']}")
+        role = "me" if s["speaker"] == "me" else "them"
+        label = str(labels.get(role) or "").strip()
+        speaker = f"{label} ({role})" if label else role
+        lines.append(f"[{ts}] {speaker}: {s['text']}")
     text = "\n".join(lines)
     if len(text) > max_chars:
         # Keep head and tail; meetings rarely exceed this, but never send
@@ -187,19 +201,22 @@ def _fmt_ms(ms: int) -> str:
 CHUNK_CHARS = 90_000
 
 
-async def _summarize_chunk(idx: int, total: int, text: str) -> str:
+async def _summarize_chunk(idx: int, total: int, text: str,
+                           speaker_labels: dict | None = None) -> str:
     prompt = f"""Summarize part {idx}/{total} of a meeting transcript into dense notes:
 every decision, number, name, commitment, and question, each with its [m:ss] timestamp.
 Keep quoted phrases verbatim in their original language. Bullets only.
+Speaker mapping: {_speaker_context(speaker_labels)}.
 
 {text}"""
     return await run_codex(prompt, "medium")
 
 
-async def generate_artifacts(session_id: str, started_at: str, segments) -> dict:
+async def generate_artifacts(session_id: str, started_at: str, segments,
+                             speaker_labels: dict | None = None) -> dict:
     prompt = f"""You are the analysis engine of a private meeting-notes system.
 Below is the transcript of one recording (id {session_id}, started {started_at}).
-Speakers: "me" = the operator, "them" = the other side of the call.
+Speakers: {_speaker_context(speaker_labels)}.
 Timestamps are [m:ss] from recording start.
 
 Produce a JSON object with:
@@ -235,7 +252,8 @@ Transcript:
 
 Answer with the JSON object only."""
     prompt = prompt.replace("{tag_vocabulary}", config.TAG_VOCABULARY)
-    full = transcript_block(segments, max_chars=10_000_000)
+    full = transcript_block(
+        segments, max_chars=10_000_000, speaker_labels=speaker_labels)
     if len(full) > CHUNK_CHARS:
         lines = full.split("\n")
         chunks, cur = [], []
@@ -248,7 +266,8 @@ Answer with the JSON object only."""
             chunks.append("\n".join(cur))
         parts = []
         for i, ch in enumerate(chunks, 1):
-            parts.append(await _summarize_chunk(i, len(chunks), ch))
+            parts.append(await _summarize_chunk(
+                i, len(chunks), ch, speaker_labels=speaker_labels))
         digest = "\n\n".join(
             f"--- part {i} notes ---\n{p}" for i, p in enumerate(parts, 1))
         prompt = prompt.replace(
@@ -270,17 +289,18 @@ Answer with the JSON object only."""
 
 # ---------------------------------------------------------------- chat
 
-async def chat_session(segments, history, question: str) -> str:
+async def chat_session(segments, history, question: str,
+                       speaker_labels: dict | None = None) -> str:
     convo = "\n".join(
         f"{m['role']}: {m['content']}" for m in history[-10:])
     prompt = f"""You are the assistant of a private meeting-notes system, answering
-questions about ONE meeting. "me" = the operator, "them" = the other side.
+questions about ONE meeting. Speaker mapping: {_speaker_context(speaker_labels)}.
 Answer in the language of the question. Be direct and specific; cite moments as
 [m:ss] timestamps taken from the transcript lines you used. If the transcript
 doesn't contain the answer, say so plainly.
 
 Transcript:
-{transcript_block(segments)}
+{transcript_block(segments, speaker_labels=speaker_labels)}
 
 Prior conversation (may be empty):
 {convo}
@@ -296,8 +316,9 @@ async def chat_global(context_blocks: list[str], history, question: str) -> str:
     ctx = "\n\n".join(context_blocks) if context_blocks else "(no matching meetings found)"
     prompt = f"""You are the assistant of a private meeting-notes system, answering
 questions across ALL of the operator's recorded meetings. Below are the most
-relevant excerpts retrieved for this question. "me" = the operator, "them" =
-the other side.
+relevant excerpts retrieved for this question. A name followed by “(me)” is the
+operator; a name followed by “(them)” is the other/system-audio side. Unnamed
+roles remain “me” and “them”.
 Answer in the language of the question. Be direct; name which meeting(s) (title
 and date) each claim comes from, with [m:ss] moments where useful. If the
 retrieved context can't answer, say what's missing.
