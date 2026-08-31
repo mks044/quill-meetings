@@ -1,5 +1,40 @@
 # Project status
 
+## Shipped 2026-08-31 — private meeting notebook
+
+Every meeting now has a dedicated **My notes** tab between Summary and
+Transcript. It is a private, language-neutral Markdown notebook for the owner's
+own thoughts rather than another AI artifact: the same note follows EN/RU,
+appears while a finalized recording is still processing, autosaves after 800 ms,
+and saves immediately with Cmd/Ctrl-S. A save snapshots its draft, so typing
+that continues during the request is queued for the next save instead of being
+lost.
+
+Revision checks prevent two windows from silently overwriting one another. A
+conflict preserves the local draft and offers **Copy draft** or **Reload saved
+note**. Notes are normalized, reject control characters, and are bounded at
+100 KiB UTF-8. Full owner Markdown export places My notes ahead of the AI
+summary; Copy Summary stays AI-only. Both Summary-only and Full guest DTOs omit
+private notes, including links issued before this feature.
+
+### Verification
+
+- Thirty dashboard tests, the sync-agent test, the shell sync regression, nine
+  Swift recorder tests, JavaScript/Python syntax, and diff checks pass.
+- Isolated real-data browser checks cover desktop/mobile EN/RU, Unicode
+  Markdown, debounce and keyboard saves, rapid typing during an in-flight save,
+  language switching, two-window conflict recovery, processing rows, export,
+  and both guest scopes without console errors.
+- Live at `039cb0c` after an integrity-checked backup at
+  `/home/max/quill-data/backups/quill-before-owner-notes-20260831T091741Z.db`.
+  All six existing meetings have empty notes at revision zero; exact logical
+  comparisons show zero changes to sessions, 6,916 segments, 40 actions,
+  language artifacts, share tokens, deleted rows, chats, and the FTS index.
+- Production rejected a stale write with 409 and no mutation; the existing Full
+  share serializes no private-note field. SQLite integrity is `ok`, queues are
+  empty, the service and public health endpoint are green, served asset hashes
+  match the release, and the service journal is clean.
+
 ## Shipped 2026-08-31 — owner-assigned voice names
 
 Each processed meeting now has an optional **Name voices** editor in Transcript.
