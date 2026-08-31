@@ -150,6 +150,10 @@ Tell the operator, in their words:
   **Copy summary** excludes the transcript, while **Copy full meeting** exports
   the private notebook, summary, and transcript as Markdown. `••• → Regenerate
   summary` re-runs the AI and warns before replacing owner edits.
+- **Library** groups finished and processing recordings by their actual capture
+  day and leads with each one-sentence summary. It shows only a boolean when My
+  notes exists — never the notebook body — and uses translated RU title/summary
+  artifacts when available with an EN fallback.
 - **Voices**: in **Transcript**, **Name voices** optionally labels the two
   recorder sources everywhere (transcript, player, search, Ask, export, and
   shares). `Your microphone` is one source; `Other side / system audio` may be

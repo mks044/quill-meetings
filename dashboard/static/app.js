@@ -1235,7 +1235,8 @@ function syncSearchChrome(lang) {
     "Search private notes and transcripts",
     "Поиск по личным заметкам и транскриптам");
   $(".top-search")?.setAttribute("aria-label", label);
-  $("#global-search")?.setAttribute("placeholder", `${label}…`);
+  $("#global-search")?.setAttribute("placeholder", copy(lang,
+    "Search notes & transcripts…", "Заметки и транскрипты…"));
 }
 
 async function route() {
@@ -1260,29 +1261,138 @@ const stale = (gen) => gen !== undefined && gen !== navGen;
 
 // ---------------------------------------------------------------- library
 
-let libTag = "";
+let libTag = "", libraryPollTimer = null;
+
+function ruCountForm(count, one, few, many) {
+  const mod10 = count % 10, mod100 = count % 100;
+  return mod10 === 1 && mod100 !== 11 ? one
+    : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) ? few : many;
+}
+
+function meetingCountText(count, lang) {
+  return lang === "ru"
+    ? `${count} ${ruCountForm(count, "встреча", "встречи", "встреч")}`
+    : `${count} meeting${count === 1 ? "" : "s"}`;
+}
+
+function openActionCountText(count, lang) {
+  if (!count) return copy(lang, "No open actions", "Нет открытых задач");
+  return lang === "ru"
+    ? `${count} ${ruCountForm(count, "открытая задача", "открытые задачи", "открытых задач")}`
+    : `${count} open action${count === 1 ? "" : "s"}`;
+}
+
+function hubDuration(seconds, lang) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}${copy(lang, "s", " с")}`;
+  const totalMinutes = Math.round(total / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours) return `${hours}${copy(lang, "h", " ч")}${minutes ? ` ${minutes}${copy(lang, "m", " мин")}` : ""}`;
+  return `${minutes}${copy(lang, " min", " мин")}`;
+}
+
+function localDayKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "invalid";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function hubDayInfo(iso, lang, now = new Date()) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return {
+    key: "invalid", label: copy(lang, "Date unavailable", "Дата недоступна"), date: null,
+  };
+  const today = localDayKey(now);
+  const yesterdayDate = new Date(now);
+  yesterdayDate.setHours(12, 0, 0, 0);
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const key = localDayKey(date);
+  let label;
+  if (key === today) label = copy(lang, "Today", "Сегодня");
+  else if (key === localDayKey(yesterdayDate)) label = copy(lang, "Yesterday", "Вчера");
+  else label = date.toLocaleDateString(lang === "ru" ? "ru-RU" : "en-US", {
+    weekday: "long", month: "long", day: "numeric",
+    ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}),
+  });
+  return { key, label, date };
+}
+
+function hubRelativeAge(iso, lang, now = new Date()) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const delta = date.getTime() - now.getTime();
+  const abs = Math.abs(delta);
+  let unit = "minute", divisor = 60_000;
+  if (abs >= 36 * 3_600_000) { unit = "day"; divisor = 86_400_000; }
+  else if (abs >= 90 * 60_000) { unit = "hour"; divisor = 3_600_000; }
+  const value = Math.round(delta / divisor);
+  return new Intl.RelativeTimeFormat(lang === "ru" ? "ru-RU" : "en-US", {
+    numeric: "auto",
+  }).format(value, unit);
+}
+
+function hubStatusText(s, lang) {
+  return s.ai_status === "transcribing"
+    ? copy(lang, "Transcribing on Mac", "Расшифровывается на Mac")
+    : s.ai_status === "transcription_failed"
+      ? copy(lang, "Transcription needs attention", "Нужно проверить расшифровку")
+      : s.ai_status === "failed" && s.ai_retry_at
+        ? copy(lang, "AI retry scheduled", "Повтор ИИ запланирован")
+        : s.ai_status === "failed"
+          ? copy(lang, "Summary needs attention", "Нужно проверить резюме")
+          : s.ai_status === "pending"
+            ? copy(lang, "Summary queued", "Резюме в очереди")
+            : s.ai_status === "running"
+              ? copy(lang, "Generating summary", "Создаётся резюме") : "";
+}
+
+function hubGroups(sessions, lang) {
+  const groups = new Map();
+  let invalid = null;
+  for (const session of sessions) {
+    const info = hubDayInfo(session.started_at, lang);
+    if (info.key === "invalid") {
+      invalid ||= { ...info, sessions: [] };
+      invalid.sessions.push(session);
+      continue;
+    }
+    if (!groups.has(info.key)) groups.set(info.key, { ...info, sessions: [] });
+    groups.get(info.key).sessions.push(session);
+  }
+  const values = [...groups.values()];
+  if (invalid) values.push(invalid);
+  return values;
+}
+
 async function libraryView(gen) {
+  clearTimeout(libraryPollTimer);
   setNav("library");
-  const { sessions } = await api("/api/sessions");
-  if (stale(gen)) return;
   const lang = localStorage.getItem("quill_lang") || "en";
+  const { sessions } = await api(`/api/sessions?lang=${lang}`);
+  if (stale(gen)) return;
   const tags = [...new Set(sessions.flatMap((s) => s.tags || []))];
   if (!sessions.length) {
     view.innerHTML = `<div class="empty-state">
-      <div class="big">No meetings yet</div>
-      <div>Record with quill on the Mac — it lands here on stop.</div></div>`;
+      <div class="big">${copy(lang, "No meetings yet", "Встреч пока нет")}</div>
+      <div>${copy(lang, "Record with Quill on the Mac — it lands here when capture ends.", "Запишите встречу через Quill на Mac — после завершения она появится здесь.")}</div></div>`;
     return;
   }
+  const list = libTag ? sessions.filter((s) => (s.tags || []).includes(libTag)) : sessions;
+  const openActions = list.reduce((total, session) => total + Number(session.open_actions || 0), 0);
   view.innerHTML = `
-    <div class="lib-head"><h1>Meetings</h1>
-      <span class="lib-count">${sessions.length} recorded</span></div>
+    <header class="lib-hero">
+      <div class="section-kicker">${copy(lang, "Private meeting archive", "Личный архив встреч")}</div>
+      <div class="lib-head"><h1>${copy(lang, "Meetings", "Встречи")}</h1></div>
+      <p>${copy(lang, "The useful part first; the recording stays one click away.", "Сначала главное; запись и транскрипт всегда в одном клике.")}</p>
+      <div class="lib-stats"><span>${meetingCountText(list.length, lang)}</span><span aria-hidden="true">·</span><span>${openActionCountText(openActions, lang)}</span></div>
+    </header>
     <form class="mobile-search" id="mobile-search">
       <label class="sr-only" for="mobile-search-input">${copy(lang, "Search private notes and transcripts", "Поиск по личным заметкам и транскриптам")}</label>
       <input id="mobile-search-input" type="search" maxlength="500" placeholder="${copy(lang, "Search notes and transcripts…", "Искать заметки и транскрипты…")}" autocomplete="off">
       <button aria-label="${copy(lang, "Search", "Найти")}">→</button>
     </form>
     ${tags.length ? `<div class="tag-row">
-      <button class="tag-chip ${!libTag ? "active" : ""}" data-tag="">All</button>
+      <button class="tag-chip ${!libTag ? "active" : ""}" data-tag="">${copy(lang, "All", "Все")}</button>
       ${tags.map((t) => `<button class="tag-chip ${libTag === t ? "active" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}
     </div>` : ""}
     <div id="cards"></div>`;
@@ -1295,35 +1405,52 @@ async function libraryView(gen) {
     const b = e.target.closest("[data-tag]");
     if (b) { libTag = b.dataset.tag; libraryView(); }
   });
-  const list = libTag ? sessions.filter((s) => (s.tags || []).includes(libTag)) : sessions;
-  $("#cards").innerHTML = list.map(cardHTML).join("");
-  if (sessions.some((s) => s.ai_status === "transcribing")) {
-    setTimeout(() => {
+  $("#cards").innerHTML = list.length ? hubGroups(list, lang).map((group, index) => `
+    <section class="meeting-day" aria-labelledby="meeting-day-${index}">
+      <header class="day-head"><h2 id="meeting-day-${index}">${esc(group.label)}</h2><span>${group.sessions.length}</span></header>
+      <div class="day-list">${group.sessions.map((session) => cardHTML(session, lang)).join("")}</div>
+    </section>`).join("") : `<div class="empty-state filtered-empty">
+      <div class="big">${copy(lang, "No meetings with this tag", "Нет встреч с этим тегом")}</div>
+      <button class="btn" id="clear-tag">${copy(lang, "Show all meetings", "Показать все встречи")}</button></div>`;
+  $("#clear-tag")?.addEventListener("click", () => { libTag = ""; libraryView(); });
+  const changing = new Set(["transcribing", "pending", "running"]);
+  if (sessions.some((s) => changing.has(s.ai_status)
+      || (s.ai_status === "failed" && s.ai_retry_at))) {
+    libraryPollTimer = setTimeout(() => {
       if ((location.hash || "#/") === "#/") route();
     }, 5000);
   }
 }
 
-function cardHTML(s) {
-  const d = dateParts(s.started_at);
-  const aiNote = s.ai_status !== "done"
-    ? `<span class="ai-badge ${s.ai_status}">${esc(aiBadgeText(s))}</span>` : "";
-  const snippet = summaryModel(s).brief;
+function cardHTML(s, lang = "en") {
+  const date = new Date(s.started_at);
+  const validDate = !Number.isNaN(date.getTime());
+  const time = validDate ? date.toLocaleTimeString(lang === "ru" ? "ru-RU" : "en-US", {
+    hour: "numeric", minute: "2-digit",
+  }) : "—";
+  const status = hubStatusText(s, lang);
+  const snippet = summaryModel(s).brief || status
+    || copy(lang, "Summary not available yet.", "Резюме пока недоступно.");
+  const voices = [...new Set([
+    s.speaker_labels?.me, s.speaker_labels?.them,
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+  const tags = (s.tags || []).slice(0, 3);
   return `<a class="meeting-card" href="#/m/${encodeURIComponent(s.id)}">
-    <div class="mc-date"><b>${d.day}</b>${d.year}<br>${d.time}</div>
-    <div>
-      <div class="mc-title">${esc(s.title || s.id)}</div>
-      <div class="mc-snippet">${esc(snippet)}</div>
-      <div class="mc-chips">
-        ${(s.tags || []).map((t) => `<span class="chip tag">${esc(t)}</span>`).join("")}
-        ${(s.keywords || []).slice(0, 4).map((k) => `<span class="chip">${esc(k)}</span>`).join("")}
+    ${validDate ? `<time class="mc-time" datetime="${esc(s.started_at)}">${esc(time)}</time>`
+      : `<span class="mc-time" aria-label="${copy(lang, "Time unavailable", "Время недоступно")}">—</span>`}
+    <div class="mc-main">
+      <div class="mc-heading"><h3 class="mc-title">${esc(s.title || s.id)}</h3>
+        ${status ? `<span class="ai-badge ${esc(s.ai_status)}">${esc(status)}</span>` : ""}</div>
+      <p class="mc-snippet">${esc(snippet)}</p>
+      <div class="mc-meta">
+        <span>${hubDuration(s.duration_s, lang)}</span>
+        ${validDate ? `<span>${esc(hubRelativeAge(s.started_at, lang))}</span>` : ""}
+        ${s.open_actions ? `<span class="mc-actions-open">☐ ${esc(openActionCountText(Number(s.open_actions), lang))}</span>` : ""}
+        ${s.has_owner_notes ? `<span class="mc-note-present">✎ ${copy(lang, "My notes", "Мои заметки")}</span>` : ""}
+        ${voices.length ? `<span class="mc-voices">${voices.map(esc).join(" · ")}</span>` : ""}
+        ${tags.map((tag) => `<span class="chip tag">${esc(tag)}</span>`).join("")}
       </div>
-    </div>
-    <div class="mc-side">
-      <span class="mc-dur">${fmtDur(s.duration_s)}</span>
-      ${s.open_actions ? `<span class="mc-actions-open">☐ ${s.open_actions} open</span>` : ""}
-      ${aiNote}
-    </div></a>`;
+    </div><span class="mc-arrow" aria-hidden="true">→</span></a>`;
 }
 
 // ---------------------------------------------------------------- meeting

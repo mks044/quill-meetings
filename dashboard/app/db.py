@@ -401,12 +401,17 @@ def session_row_to_dict(row, include_owner_notes: bool = True) -> dict:
     owner_notes = d.pop("owner_notes_md", None)
     owner_notes_revision = d.pop("owner_notes_revision", 0)
     owner_notes_edited_at = d.pop("owner_notes_edited_at", None)
+    has_owner_notes = bool(owner_notes_edited_at and owner_notes)
     if include_owner_notes:
         d["owner_notes"] = {
             "markdown": owner_notes or "",
             "revision": owner_notes_revision,
-            "edited": bool(owner_notes_edited_at and owner_notes),
+            "edited": has_owner_notes,
         }
+    else:
+        # Library rows need only a private presence indicator; never serialize
+        # notebook content, revision, or edit time across the whole archive.
+        d["has_owner_notes"] = has_owner_notes
     d["speaker_labels"] = {
         "me": stored_speaker_label(d.pop("speaker_me_label", None)),
         "them": stored_speaker_label(d.pop("speaker_them_label", None)),

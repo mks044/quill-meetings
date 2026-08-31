@@ -30,6 +30,10 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
 
 - **Summary first** — every meeting opens on a concise outcome, explicit
   decisions, topic-organized notes, open questions, and source-linked actions.
+- **Meeting hub** — recordings are grouped under the day they actually
+  happened, with a compact one-sentence summary, duration, state, open actions,
+  tags, assigned voices, and private-note presence; RU uses translated notes
+  where available and safely falls back to EN.
 - **Private meeting notebook** — **My notes** is a language-neutral Markdown
   page that autosaves independently from AI regeneration and never appears in
   an anonymous share link, including a Full meeting link.

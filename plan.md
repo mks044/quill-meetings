@@ -728,3 +728,94 @@ the existing Full share still omits private-note fields, public static assets
 match, queues are empty, the service journal is clean, and integrity is `ok`.
 Rollback can ignore or drop the derived FTS table; canonical notebook,
 recording, transcript, AI artifact, action, voice, and share data are unchanged.
+
+---
+
+# Section 7 — summary-led meeting hub
+
+## Why this is next
+
+The meeting detail is now useful, but the library is still a flat stream of
+similarly weighted rows. That makes a six-meeting archive tolerable and a
+larger archive hard to scan. Wispr's current hub treats finished meetings as
+compact records grouped under the day they were actually recorded, with title,
+duration, participants, and a one-sentence summary. Quill already has nearly
+all of that data and should use it before adding calendar credentials or an
+upcoming-meeting model.
+
+This section is deliberately honest about scope: Quill shows recordings that
+exist, including processing recordings. It does not invent calendar events,
+scheduled start times, attendees, or live-call controls.
+
+## Product contract
+
+The private library becomes a summary-led **Meeting library** grouped by the
+recording's actual local calendar day. Today and yesterday use friendly labels;
+older groups use localized weekday/date headings and retain newest-first order.
+Filtering by tag preserves the same grouping and shows a clear filtered-empty
+state rather than an unexplained blank page.
+
+The header reports the visible meeting count and open-action count. Each compact
+meeting row exposes, in priority order:
+
+- actual recording time, title, and one-sentence at-a-glance summary;
+- duration and a relative-age label;
+- processing/failure state when AI or local transcription is not complete;
+- open-action count, up to three useful tags, optional assigned voice names,
+  and a **My notes** indicator when the private notebook is non-empty.
+
+The summary remains the dominant preview. Keywords do not compete with tags in
+the list, and the transcript is not serialized or shown. Clicking anywhere on
+the row opens the meeting on its existing default Summary view; processing
+rows still open their Status view.
+
+## Data and privacy boundaries
+
+The list API continues to omit `owner_notes_md` and all transcript segments. It
+adds only `has_owner_notes: boolean`, derived from a non-empty saved notebook;
+revision, edit timestamp, and content remain exclusive to the authenticated
+single-meeting payload. Shared DTOs do not receive this indicator or any hub
+metadata change.
+
+All counts and grouping are read-only projections. No session, summary, action,
+tag, voice, notebook, transcript, audio, or share row is rewritten. Invalid
+dates fall into a final localized **Date unavailable** group rather than
+breaking the library. Browser-local calendar boundaries determine Today /
+Yesterday so the displayed group agrees with the time shown on that device.
+
+## Frontend composition
+
+- Use semantic day sections and heading levels around normal anchor rows.
+- Keep tag chips keyboard reachable and retain the existing processing poll.
+- Localize hub heading, count grammar, day labels, relative age, action/note
+  metadata, processing copy, filtered empty state, and mobile search.
+- Desktop rows use a narrow time column, flexible summary body, and restrained
+  right-side metadata. Under 650 px, side metadata folds below the summary
+  instead of disappearing; under 460 px the mobile search remains available.
+- Preserve a calm document-like surface: day groups provide hierarchy, not a
+  grid of dashboard widgets.
+
+## Files
+
+- `dashboard/app/db.py`, `dashboard/app/main.py` — private list projection for
+  the notebook-presence boolean
+- `dashboard/static/app.js`, `style.css` — localized grouping, compact summary
+  rows, state metadata, filtered empty state, and responsive hierarchy
+- `dashboard/test_owner_notes.py`, `dashboard/test_reliability.py` — strict
+  list DTO, note presence/clear behavior, and unchanged share projection
+- `README.md`, `AGENTS.md`, `status.md` — exact hub behavior and scope
+
+## Verification and rollback
+
+Use isolated data for same-day grouping, Today/Yesterday, older and invalid
+dates, tag filtering, processing/failure rows, EN/RU grammar, named/unnamed
+voices, private-note presence and clearing, and zero note/transcript leakage in
+list/share payloads. Browser-test the real six-meeting archive on desktop,
+responsive rules, tag filters, row navigation, processing polling, and both
+languages with no console errors.
+
+Production rollout changes only code and one private boolean projection. Back
+up SQLite, compare every canonical table and transcript/private FTS index, make
+no valid write probe, verify all six rows report `has_owner_notes: false`, then
+check public assets, queues, journal, auth, and integrity. Rollback is a code
+revert; no database migration or content restoration is required.

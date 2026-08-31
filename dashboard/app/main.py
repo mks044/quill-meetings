@@ -196,15 +196,38 @@ async def shutdown() -> None:
 # ---------------------------------------------------------------- sessions
 
 @app.get("/api/sessions")
-def list_sessions(q: str = "", tag: str = ""):
+def list_sessions(q: str = "", tag: str = "", lang: str = "en"):
+    if lang not in ("en", "ru"):
+        raise HTTPException(400, "only en and ru are supported")
     with db.closing_conn() as conn:
         rows = conn.execute(
             """SELECT s.*, (SELECT count(*) FROM actions a
                             WHERE a.session_id = s.id AND a.done = 0) AS open_actions
                FROM sessions s ORDER BY started_at DESC""").fetchall()
+        alt_rows = (conn.execute(
+            "SELECT * FROM artifacts_lang WHERE lang=?", (lang,)).fetchall()
+            if lang != "en" else [])
     # The library does not need to transfer up to 100 KiB of private notebook
     # text per card. The individual authenticated session endpoint includes it.
     sessions = [db.session_row_to_dict(r, include_owner_notes=False) for r in rows]
+    if alt_rows:
+        import json as _json
+        alternatives = {row["session_id"]: row for row in alt_rows}
+        for session in sessions:
+            alt = alternatives.get(session["id"])
+            if not alt:
+                continue
+            session["title"] = alt["title"] or session.get("title")
+            if alt["overview_md"] is not None:
+                session["overview_md"] = alt["overview_md"]
+            if alt["summary_json"]:
+                session["summary"] = _json.loads(alt["summary_json"])
+            if alt["outline_json"]:
+                session["outline"] = _json.loads(alt["outline_json"])
+            if alt["keywords_json"]:
+                session["keywords"] = _json.loads(alt["keywords_json"])
+            session["notes_revision"] = alt["notes_revision"]
+            session["notes_edited"] = bool(alt["notes_edited_at"])
     if tag:
         sessions = [s for s in sessions if tag in (s.get("tags") or [])]
     if q:

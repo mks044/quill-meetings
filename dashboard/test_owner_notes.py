@@ -96,6 +96,7 @@ class OwnerNotesTests(unittest.TestCase):
         self.assertIsNone(row["owner_notes_md"])
         self.assertEqual(row["owner_notes_revision"], 2)
         self.assertIsNone(row["owner_notes_edited_at"])
+        self.assertFalse(main.list_sessions()["sessions"][0]["has_owner_notes"])
 
     def test_stale_window_cannot_overwrite_and_validation_is_bounded(self):
         self._edit("first window")
@@ -163,6 +164,17 @@ class OwnerNotesTests(unittest.TestCase):
         library_row = main.list_sessions()["sessions"][0]
         self.assertNotIn("owner_notes", library_row)
         self.assertNotIn(private_text, json.dumps(library_row))
+        self.assertTrue(library_row["has_owner_notes"])
+        self.assertNotIn("owner_notes_revision", library_row)
+        self.assertNotIn("owner_notes_edited_at", library_row)
+        russian_row = main.list_sessions(lang="ru")["sessions"][0]
+        self.assertEqual(russian_row["title"], "Планирование")
+        self.assertEqual(russian_row["summary"]["brief"], "План готов.")
+        self.assertTrue(russian_row["has_owner_notes"])
+        self.assertNotIn(private_text, json.dumps(russian_row, ensure_ascii=False))
+        with self.assertRaises(HTTPException) as language:
+            main.list_sessions(lang="fr")
+        self.assertEqual(language.exception.status_code, 400)
 
         with db.closing_conn() as conn:
             conn.execute(
