@@ -1,5 +1,48 @@
 # Project status
 
+## Shipped 2026-08-31 — summary-led meeting hub
+
+The private library is now a calm meeting hub rather than a flat undifferentiated
+feed. Recordings are grouped under the local day they actually happened, with
+Today/Yesterday labels where relevant. Compact semantic rows lead with the
+one-sentence at-a-glance summary and retain the actual time, duration, relative
+age, open actions, up to three tags, optional assigned voice names, processing
+state, and a private **My notes** presence indicator.
+
+The header reports visible meeting/action counts, tag filters preserve day
+grouping, and processing/retry states refresh automatically. Invalid dates fall
+into a final Date unavailable group instead of breaking the page. Mobile rows
+fold all useful metadata below the summary rather than hiding it. EN/RU hub
+copy is localized; Russian library rows use translated title/summary artifacts
+where they exist and safely fall back to English elsewhere.
+
+The list payload still contains no transcript or notebook body. It adds only
+`has_owner_notes: boolean` for the authenticated owner and omits note revision,
+edit time, and content. Summary/Full shared DTOs receive neither the notebook
+nor its presence indicator. This release has no database migration and writes
+no meeting content.
+
+### Verification
+
+- Thirty-two dashboard tests, the sync-agent test, shell sync regression, nine
+  Swift recorder tests, JavaScript/Python syntax, and diff checks pass. List
+  tests cover RU overlay/EN fallback, strict note-body omission, presence and
+  clearing, invalid language, and unchanged guest DTOs.
+- Real-data browser checks cover the six-meeting EN/RU archive, day groups,
+  localized summaries/counts, tag filtering, default Summary navigation,
+  private-note presence without its marker text, responsive rules, and clean
+  console logs. Disposable Today/processing/failure/invalid-date rows and the
+  1h-60m duration boundary rendered correctly and were removed afterward.
+- Live at `a33df3f` after an integrity-checked backup at
+  `/home/max/quill-data/backups/quill-before-meeting-hub-20260831T110231Z.db`.
+  All six rows report no private notebook, both RU artifacts project correctly,
+  and exact backup comparisons show zero changes to every canonical table,
+  6,916 transcript-index rows, and the empty private-note index.
+- The existing Full share exposes no hub/private fields and the anonymous list
+  endpoint returns 401. SQLite integrity is `ok`, queues are empty,
+  service/public health is green, served asset hashes match, and the journal is
+  clean.
+
 ## Shipped 2026-08-31 — private notes in global search
 
 Authenticated global search now finds the owner's **My notes** alongside the
