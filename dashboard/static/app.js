@@ -32,7 +32,11 @@ const dateParts = (iso) => {
 const api = async (path, opts) => {
   const r = await fetch(path, opts);
   if (r.status === 401) { location.reload(); throw new Error("unauthorized"); }
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  if (!r.ok) {
+    const error = new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    error.status = r.status;
+    throw error;
+  }
   return r.json();
 };
 const post = (path, body) => api(path, {
@@ -107,6 +111,13 @@ function summaryModel(s) {
 
 const mdLine = (value) => String(value || "").replace(/\s*\n\s*/g, " ").trim();
 const mdInline = (value) => mdLine(value).replace(/([\\`*_{}\[\]<>])/g, "\\$1");
+const ownerNotebookStates = new Map();
+
+function ownerNotesMarkdown(s) {
+  const local = ownerNotebookStates.get(s?.id);
+  if (local) return local.draft;
+  return typeof s?.owner_notes?.markdown === "string" ? s.owner_notes.markdown : "";
+}
 
 function summaryMarkdown(s, lang) {
   const summary = summaryModel(s);
@@ -141,7 +152,15 @@ function summaryMarkdown(s, lang) {
 }
 
 function fullMeetingMarkdown(s, lang) {
-  const lines = [summaryMarkdown(s, lang).trim(), "", `## ${copy(lang, "Transcript", "Транскрипт")}`, ""];
+  const summaryLines = summaryMarkdown(s, lang).trim().split("\n");
+  const privateNote = ownerNotesMarkdown(s).trim();
+  if (privateNote) {
+    const firstSection = summaryLines.findIndex((line) => /^##\s/.test(line));
+    const at = firstSection >= 0 ? firstSection : summaryLines.length;
+    summaryLines.splice(at, 0,
+      `## ${copy(lang, "My notes", "Мои заметки")}`, "", privateNote, "");
+  }
+  const lines = [summaryLines.join("\n"), "", `## ${copy(lang, "Transcript", "Транскрипт")}`, ""];
   for (const segment of s.segments || []) {
     const speaker = speakerLabel(s, segment.speaker === "me" ? "me" : "them", lang);
     lines.push(`[${fmt(segment.start_ms)}] **${mdInline(speaker)}:** ${mdLine(segment.text)}`);
@@ -191,6 +210,240 @@ async function copyText(text, lang, successMessage) {
   else prompt(copy(lang, "Copy the Markdown:", "Скопируйте Markdown:"), text);
   return copied;
 }
+
+// ---------------------------------------------------------------- private meeting notebook
+
+const OWNER_NOTES_MAX_BYTES = 100 * 1024;
+const utf8Size = (value) => new TextEncoder().encode(value).length;
+
+function remoteOwnerNotes(s) {
+  const value = s?.owner_notes || {};
+  return {
+    markdown: typeof value.markdown === "string" ? value.markdown : "",
+    revision: Number.isInteger(value.revision) && value.revision >= 0 ? value.revision : 0,
+  };
+}
+
+function ownerNotebookState(s) {
+  const remote = remoteOwnerNotes(s);
+  let state = ownerNotebookStates.get(s.id);
+  if (!state) {
+    state = {
+      id: s.id, draft: remote.markdown, saved: remote.markdown,
+      revision: remote.revision, dirty: false, inFlight: false,
+      inFlightSnapshot: null, inFlightExpected: null,
+      conflict: false, error: "", timer: null, lang: s.lang || "en",
+    };
+    ownerNotebookStates.set(s.id, state);
+    return state;
+  }
+  if (remote.revision > state.revision) {
+    const observedOwnSave = state.inFlight
+      && remote.revision === state.inFlightExpected + 1
+      && remote.markdown === state.inFlightSnapshot;
+    if (observedOwnSave) {
+      state.revision = remote.revision;
+      state.saved = remote.markdown;
+      state.dirty = state.draft !== state.saved;
+    } else if (state.dirty || state.inFlight || state.conflict) {
+      state.conflict = true;
+      state.error = "conflict";
+    } else {
+      state.draft = remote.markdown;
+      state.saved = remote.markdown;
+      state.revision = remote.revision;
+    }
+  } else if (remote.revision === state.revision
+      && !state.dirty && !state.inFlight && !state.conflict) {
+    state.draft = remote.markdown;
+    state.saved = remote.markdown;
+  }
+  return state;
+}
+
+function notebookPanelHTML(s, lang) {
+  const state = ownerNotebookState(s);
+  state.lang = lang;
+  return `<div class="owner-notebook" id="owner-notebook" data-session-id="${esc(s.id)}">
+    <header class="notebook-head">
+      <div><div class="section-kicker">${copy(lang, "Your working page", "Ваша рабочая страница")}</div>
+        <h2>${copy(lang, "My notes", "Мои заметки")}</h2>
+        <p>${copy(lang,
+          "Capture questions, context, and follow-ups in your own words.",
+          "Записывайте вопросы, контекст и следующие шаги своими словами.")}</p></div>
+      <div class="notebook-private"><span aria-hidden="true">●</span>${copy(lang,
+        "Private · never included in share links",
+        "Приватно · никогда не попадает в ссылки")}</div>
+    </header>
+    <label class="notebook-writing">
+      <span class="sr-only">${copy(lang, "Private notes in Markdown", "Приватные заметки в Markdown")}</span>
+      <textarea id="owner-notes-input" spellcheck="true" placeholder="${esc(copy(lang,
+        "Questions to ask…\nFollow-up…\nContext I don't want to lose…",
+        "Что спросить…\nСледующий шаг…\nКонтекст, который нельзя потерять…"))}">${esc(state.draft)}</textarea>
+    </label>
+    <div class="notebook-conflict hidden" id="notebook-conflict" role="alert">
+      <div><b>${copy(lang, "This note changed in another window.", "Эта заметка изменилась в другом окне.")}</b>
+        <span>${copy(lang, "Your draft is still here. Copy it or deliberately load the server copy.", "Ваш черновик сохранён здесь. Скопируйте его или явно загрузите версию с сервера.")}</span></div>
+      <div><button type="button" class="btn" id="notebook-copy-draft">${copy(lang, "Copy my draft", "Скопировать черновик")}</button>
+        <button type="button" class="btn" id="notebook-reload">${copy(lang, "Reload saved note", "Загрузить сохранённое")}</button></div>
+    </div>
+    <footer class="notebook-foot">
+      <span id="notebook-count"></span>
+      <div class="notebook-save-wrap"><button type="button" class="notebook-retry hidden" id="notebook-retry">${copy(lang, "Retry", "Повторить")}</button>
+        <span class="notebook-save-state" id="notebook-save-state" role="status" aria-live="polite"></span></div>
+    </footer>
+  </div>`;
+}
+
+function paintOwnerNotebook(state) {
+  const root = $("#owner-notebook");
+  if (!root || root.dataset.sessionId !== state.id) return;
+  const lang = state.lang;
+  const bytes = utf8Size(state.draft);
+  const count = $("#notebook-count");
+  count.textContent = `${state.draft.length.toLocaleString()} ${copy(lang, "characters", "симв.")} · ${(bytes / 1024).toFixed(1)} / 100 KB`;
+  count.classList.toggle("over-limit", bytes > OWNER_NOTES_MAX_BYTES);
+
+  let phase = "saved", label = copy(lang, "Saved", "Сохранено");
+  if (state.conflict) {
+    phase = "conflict";
+    label = copy(lang, "Save paused — choose a copy", "Сохранение остановлено — выберите версию");
+  } else if (state.inFlight) {
+    phase = "saving";
+    label = copy(lang, "Saving…", "Сохраняю…");
+  } else if (state.error) {
+    phase = "error";
+    label = state.error === "limit"
+      ? copy(lang, "Over the 100 KB limit", "Превышен лимит 100 KB")
+      : copy(lang, "Couldn't save", "Не удалось сохранить");
+  } else if (state.dirty) {
+    phase = "dirty";
+    label = copy(lang, "Unsaved changes", "Есть несохранённые изменения");
+  }
+  root.dataset.saveState = phase;
+  $("#notebook-save-state").textContent = label;
+  $("#notebook-conflict").classList.toggle("hidden", !state.conflict);
+  $("#notebook-retry").classList.toggle("hidden", phase !== "error" || state.error === "limit");
+}
+
+function scheduleOwnerNotebookSave(state, delay = 800) {
+  clearTimeout(state.timer);
+  if (!state.dirty || state.conflict || state.inFlight || state.error) return;
+  state.timer = setTimeout(() => saveOwnerNotebook(state), delay);
+}
+
+async function saveOwnerNotebook(state) {
+  clearTimeout(state.timer);
+  state.timer = null;
+  if (!state.dirty || state.conflict || state.inFlight) return;
+  if (utf8Size(state.draft) > OWNER_NOTES_MAX_BYTES) {
+    state.error = "limit";
+    paintOwnerNotebook(state);
+    return;
+  }
+  const snapshot = state.draft;
+  const expected = state.revision;
+  state.inFlight = true;
+  state.inFlightSnapshot = snapshot;
+  state.inFlightExpected = expected;
+  state.error = "";
+  paintOwnerNotebook(state);
+  try {
+    const fresh = await api(`/api/sessions/${encodeURIComponent(state.id)}/owner-notes?lang=${state.lang}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_revision: expected, markdown: snapshot }),
+    });
+    const remote = remoteOwnerNotes(fresh);
+    if (remote.revision < state.revision) {
+      // A separate refresh already observed a newer server revision after this
+      // request committed. Never move the local concurrency token backwards.
+      state.conflict = true;
+      state.error = "conflict";
+    } else {
+      state.revision = remote.revision;
+      state.saved = remote.markdown;
+      if (state.draft === snapshot) state.draft = remote.markdown;
+      state.dirty = state.draft !== state.saved;
+      state.conflict = false;
+    }
+  } catch (error) {
+    if (error.status === 409) {
+      state.conflict = true;
+      state.error = "conflict";
+    } else {
+      state.error = "save";
+    }
+  } finally {
+    state.inFlight = false;
+    state.inFlightSnapshot = null;
+    state.inFlightExpected = null;
+    paintOwnerNotebook(state);
+    if (state.dirty && !state.conflict && !state.error) scheduleOwnerNotebookSave(state, 0);
+  }
+}
+
+async function reloadOwnerNotebook(state) {
+  if (!confirm(copy(state.lang,
+    "Replace your local draft with the saved server note?",
+    "Заменить локальный черновик сохранённой версией с сервера?"))) return;
+  try {
+    const fresh = await api(`/api/sessions/${encodeURIComponent(state.id)}?lang=${state.lang}`);
+    const remote = remoteOwnerNotes(fresh);
+    state.draft = remote.markdown;
+    state.saved = remote.markdown;
+    state.revision = remote.revision;
+    state.dirty = false;
+    state.conflict = false;
+    state.error = "";
+    const input = $("#owner-notes-input");
+    if (input && $("#owner-notebook")?.dataset.sessionId === state.id) input.value = state.draft;
+    paintOwnerNotebook(state);
+  } catch (error) {
+    state.error = "save";
+    paintOwnerNotebook(state);
+    showToast(copy(state.lang, `Couldn't reload: ${error.message}`, `Не удалось загрузить: ${error.message}`));
+  }
+}
+
+function bindOwnerNotebook(s, lang) {
+  const root = $("#owner-notebook");
+  if (!root) return;
+  const state = ownerNotebookState(s);
+  state.lang = lang;
+  const input = $("#owner-notes-input");
+  input.value = state.draft;
+  input.addEventListener("input", () => {
+    state.draft = input.value.replace(/\r\n?/g, "\n");
+    state.dirty = state.draft !== state.saved;
+    if (!state.conflict) state.error = utf8Size(state.draft) > OWNER_NOTES_MAX_BYTES ? "limit" : "";
+    paintOwnerNotebook(state);
+    scheduleOwnerNotebookSave(state);
+  });
+  input.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      if (!state.conflict) {
+        state.error = utf8Size(state.draft) > OWNER_NOTES_MAX_BYTES ? "limit" : "";
+        saveOwnerNotebook(state);
+      }
+    }
+  });
+  $("#notebook-retry").addEventListener("click", () => {
+    state.error = "";
+    saveOwnerNotebook(state);
+  });
+  $("#notebook-copy-draft").addEventListener("click", () => copyText(
+    state.draft, lang, copy(lang, "Draft copied", "Черновик скопирован")));
+  $("#notebook-reload").addEventListener("click", () => reloadOwnerNotebook(state));
+  paintOwnerNotebook(state);
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (![...ownerNotebookStates.values()].some((state) =>
+    state.dirty || state.inFlight || state.conflict)) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 function editRowsHTML(items, kind, lang) {
   const kindLabel = kind === "decision"
@@ -1059,10 +1312,15 @@ async function meetingView(id, gen, prefetched = null) {
   const wantLang = localStorage.getItem("quill_lang") || "en";
   const s = prefetched || await api(`/api/sessions/${encodeURIComponent(id)}?lang=${wantLang}`);
   if (stale(gen)) return;
-  const lang = s.lang;
+  const localProcessing = s.ai_status === "transcribing"
+    || s.ai_status === "transcription_failed";
+  // A processing row has no translated AI artifact yet, but the application
+  // chrome and private notebook can still honor the owner's saved UI language.
+  const lang = localProcessing && wantLang === "ru" ? "ru" : s.lang;
   const d = dateParts(s.started_at);
+  const query = new URLSearchParams(location.hash.split("?")[1] || "");
 
-  if (s.ai_status === "transcribing" || s.ai_status === "transcription_failed") {
+  if (localProcessing) {
     const failed = s.ai_status === "transcription_failed";
     view.innerHTML = `<div class="meeting-page">
       <a class="meet-back" href="#/">← ${copy(lang, "Meetings", "Встречи")}</a>
@@ -1070,14 +1328,52 @@ async function meetingView(id, gen, prefetched = null) {
         <h1>${esc(s.title || s.id)}</h1>
         <div class="meet-meta"><span>${d.day} ${d.year}, ${d.time}</span><span>·</span><span>${fmtDur(s.duration_s)}</span></div>
       </header>
-      <div class="local-pipeline ${failed ? "failed" : ""}">
-        <span class="pipeline-orbit" aria-hidden="true"></span>
-        <div><div class="section-kicker">${failed ? copy(lang, "Needs attention", "Нужно проверить") : copy(lang, "Recording secured", "Запись сохранена")}</div>
-        <h2>${failed ? copy(lang, "Local transcription needs attention", "Локальная расшифровка требует внимания") : copy(lang, "Transcribing on your Mac…", "Расшифровывается на Mac…")}</h2>
-        <p>${failed
-          ? esc(s.ai_error || "The local transcription process failed. Quill preserved the recording for recovery.")
-          : copy(lang, "The recording is finalized and safe. This page will fill in automatically when the transcript arrives.", "Запись завершена и сохранена. Страница заполнится автоматически, когда будет готов транскрипт.")}</p></div>
-      </div></div>`;
+      <nav class="meeting-tabs" role="tablist" aria-label="${copy(lang, "Meeting view", "Раздел встречи")}">
+        <button id="meeting-tab-status" role="tab" aria-controls="meeting-status" data-meeting-tab="status">${copy(lang, "Status", "Статус")}</button>
+        <button id="meeting-tab-notes" role="tab" aria-controls="meeting-notes" data-meeting-tab="notes">${copy(lang, "My notes", "Мои заметки")}</button>
+      </nav>
+      <section id="meeting-status" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-status" data-meeting-panel="status">
+        <div class="local-pipeline ${failed ? "failed" : ""}">
+          <span class="pipeline-orbit" aria-hidden="true"></span>
+          <div><div class="section-kicker">${failed ? copy(lang, "Needs attention", "Нужно проверить") : copy(lang, "Recording secured", "Запись сохранена")}</div>
+          <h2>${failed ? copy(lang, "Local transcription needs attention", "Локальная расшифровка требует внимания") : copy(lang, "Transcribing on your Mac…", "Расшифровывается на Mac…")}</h2>
+          <p>${failed
+            ? esc(s.ai_error || "The local transcription process failed. Quill preserved the recording for recovery.")
+            : copy(lang, "The recording is finalized and safe. This page will fill in automatically when the transcript arrives.", "Запись завершена и сохранена. Страница заполнится автоматически, когда будет готов транскрипт.")}</p></div>
+        </div>
+      </section>
+      <section id="meeting-notes" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-notes" data-meeting-panel="notes">
+        ${notebookPanelHTML(s, lang)}
+      </section></div>`;
+    const page = $(".meeting-page");
+    const setProcessingTab = (name, updateUrl = true) => {
+      page.querySelectorAll("[data-meeting-tab]").forEach((button) => {
+        const active = button.dataset.meetingTab === name;
+        button.setAttribute("aria-selected", String(active));
+        button.tabIndex = active ? 0 : -1;
+      });
+      page.querySelectorAll("[data-meeting-panel]").forEach((panel) => {
+        panel.hidden = panel.dataset.meetingPanel !== name;
+      });
+      if (updateUrl) {
+        const params = new URLSearchParams(location.hash.split("?")[1] || "");
+        params.set("tab", name);
+        history.replaceState(null, "", `#/m/${encodeURIComponent(s.id)}?${params}`);
+      }
+    };
+    page.querySelectorAll("[data-meeting-tab]").forEach((button) => {
+      button.addEventListener("click", () => setProcessingTab(button.dataset.meetingTab));
+    });
+    $(".meeting-tabs").addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      const tabs = [...page.querySelectorAll("[data-meeting-tab]")];
+      const current = tabs.indexOf(document.activeElement);
+      const next = tabs[(current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+      event.preventDefault(); next.focus(); next.click();
+    });
+    player.unload();
+    bindOwnerNotebook(s, lang);
+    setProcessingTab(query.get("tab") === "notes" ? "notes" : "status", false);
     if (!failed) pollAI(s.id, s.ai_status);
     return;
   }
@@ -1085,11 +1381,10 @@ async function meetingView(id, gen, prefetched = null) {
   const tracks = [s.has_audio_mixed && "mixed", s.has_audio_system && "system", s.has_audio_mic && "mic"].filter(Boolean);
   const turns = groupTurns(s.segments);
   const durationMs = Math.max(s.duration_s * 1000, 1);
-  const query = new URLSearchParams(location.hash.split("?")[1] || "");
   const tParam = query.get("t");
   const requestedTab = query.get("tab");
   const initialTab = tParam ? "transcript"
-    : ["summary", "transcript", "ask"].includes(requestedTab) ? requestedTab : "summary";
+    : ["summary", "notes", "transcript", "ask"].includes(requestedTab) ? requestedTab : "summary";
 
   view.innerHTML = `<div class="meeting-page">
     <a class="meet-back" href="#/">← ${copy(lang, "Meetings", "Встречи")}</a>
@@ -1127,11 +1422,15 @@ async function meetingView(id, gen, prefetched = null) {
     </header>
     <nav class="meeting-tabs" role="tablist" aria-label="${copy(lang, "Meeting view", "Раздел встречи")}">
       <button id="meeting-tab-summary" role="tab" aria-controls="meeting-summary" data-meeting-tab="summary">${copy(lang, "Summary", "Резюме")}</button>
+      <button id="meeting-tab-notes" role="tab" aria-controls="meeting-notes" data-meeting-tab="notes">${copy(lang, "My notes", "Мои заметки")}</button>
       <button id="meeting-tab-transcript" role="tab" aria-controls="meeting-transcript" data-meeting-tab="transcript">${copy(lang, "Transcript", "Транскрипт")}</button>
       <button id="meeting-tab-ask" role="tab" aria-controls="meeting-ask" data-meeting-tab="ask">${copy(lang, "Ask", "Спросить")}</button>
     </nav>
     <section id="meeting-summary" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-summary" data-meeting-panel="summary">
       <div class="summary-layout">${summaryDocumentHTML(s, lang)}${meetingRailHTML(s, lang)}</div>
+    </section>
+    <section id="meeting-notes" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-notes" data-meeting-panel="notes">
+      ${notebookPanelHTML(s, lang)}
     </section>
     <section id="meeting-transcript" class="meeting-panel" role="tabpanel" aria-labelledby="meeting-tab-transcript" data-meeting-panel="transcript">
       ${transcriptPanelHTML(turns, lang, { session: s, nameable: true })}
@@ -1219,6 +1518,7 @@ async function meetingView(id, gen, prefetched = null) {
   sync.els = [...page.querySelectorAll(".seg")].sort((a, b) => a.dataset.idx - b.dataset.idx);
   sync.durationMs = durationMs;
   sync.railNeedle = $("#rail-needle");
+  bindOwnerNotebook(s, lang);
 
   rail?.addEventListener("click", (e) => {
     const chapter = e.target.closest("[data-jump-ms]");

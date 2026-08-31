@@ -496,3 +496,130 @@ and error state. Production probes must be invalid/stale only so real meetings
 remain unnamed until the owner chooses; verify schema, payload fallbacks,
 hashes, service logs, queue, and SQLite integrity. Rollback ignores additive
 columns and leaves all canonical transcript/audio/note data unchanged.
+
+---
+
+# Section 5 — private meeting notebook
+
+## Why this is next
+
+Quill now has a strong AI summary and a deliberately secondary transcript, but
+the owner still has nowhere to write their own thoughts. Editing the generated
+summary is correction, not note-taking: the next regeneration may replace it,
+and private observations should not be mixed into AI-authored material. Wispr's
+current meeting workspace keeps **Thoughts**, **AI Summary**, and **Transcript**
+as independent surfaces. Quill should adopt that separation while retaining its
+existing summary-first default and strict sharing boundary.
+
+This section is a dashboard notebook for a finalized or server-visible meeting,
+not a claim of live collaborative capture. The Mac recorder remains the source
+of audio truth; a lid close finalizes capture, and the server-visible processing
+row is the earliest honest place the notebook can attach.
+
+## Product contract
+
+Private meeting detail gains a **My notes** tab between Summary and Transcript.
+It is one language-neutral Markdown document per meeting: the exact same owner
+note appears while the dashboard is set to English or Russian. The note is
+independent from generated EN/RU artifacts, so translation and regeneration
+never modify or delete it.
+
+The tab contains a calm, full-width writing surface with a short empty-state
+prompt, live character count near the limit, and explicit **Saving / Saved /
+Couldn't save** feedback. Input autosaves after 800 ms of inactivity; Command-S
+or Control-S saves immediately. A save snapshots the submitted text. If typing
+continues while that request is in flight, the newer draft is sent again after
+the first response rather than being mistaken for saved content.
+
+Optimistic concurrency prevents two dashboard windows from silently
+overwriting each other. A 409 keeps the local draft visible and presents two
+deliberate recovery actions: **Copy my draft** and **Reload saved note**. There
+is no automatic last-write-wins retry after a conflict.
+
+The owner-side **Copy full meeting** export includes a non-empty `My notes`
+section before the AI summary. **Copy summary** remains AI-authored summary
+only. Existing and future anonymous links, including Full meeting links, never
+receive the owner notebook; the tab and database fields are absent from shared
+DTOs. The UI states “Private — never included in share links.” This avoids
+silently broadening the one already-issued Full link.
+
+## Storage and API
+
+Add three additive fields to `sessions`:
+
+- `owner_notes_md TEXT`
+- `owner_notes_revision INTEGER NOT NULL DEFAULT 0`
+- `owner_notes_edited_at TEXT`
+
+Private session DTOs expose a nested allow-list object with `markdown`,
+`revision`, and `edited`; shared DTO builders do not copy that object.
+
+`PATCH /api/sessions/{session_id}/owner-notes` accepts:
+
+```json
+{
+  "expected_revision": 2,
+  "markdown": "Questions for the next call…"
+}
+```
+
+The route accepts server-visible processing or completed meetings, normalizes
+line endings, rejects NUL/control characters, caps UTF-8 content at 100 KiB,
+and atomically updates only when `owner_notes_revision` matches. It returns a
+minimal fresh private notebook payload (never the meeting's potentially huge
+transcript) so the client advances from a server-owned revision. Re-saving
+identical content is a successful no-op with no revision or timestamp change;
+clearing a note stores `NULL`, increments the revision, and reports
+`edited: false`.
+
+Deletion follows the existing session lifecycle. Ingestion, transcript
+promotion, AI notes, translation, action updates, voice naming, sharing, and
+regeneration must not write these fields.
+
+## Frontend composition
+
+- Finished private meetings expose Summary / My notes / Transcript / Ask;
+  Summary remains the default and transcript timestamp deep links still open
+  Transcript.
+- Server-visible processing meetings expose My notes beside the processing
+  status, allowing the owner to capture context while local Whisper runs.
+- The textarea uses the meeting document width, monospace only for Markdown
+  punctuation-sensitive entry, an accessible label, and a minimum mobile-safe
+  height. It does not introduce a rich-text dependency.
+- Tab state is encoded in the URL, so reload/back navigation preserve the
+  current surface without turning My notes into the default.
+- Leaving the tab does not discard a dirty draft. Page unload warns only while
+  an unsaved or conflicted draft exists.
+- All strings, save states, empty prompts, errors, and conflict actions are
+  localized in English and Russian; the note body itself is never translated.
+
+## Files
+
+- `dashboard/app/db.py` — additive migration, private projection, and atomic
+  idempotent save
+- `dashboard/app/main.py` — bounded validation and owner-only PATCH route
+- `dashboard/static/app.js` — tab, autosave state machine, conflict recovery,
+  URL state, and full export composition
+- `dashboard/static/style.css` — notebook writing surface and save states
+- `dashboard/test_owner_notes.py`, `dashboard/test_reliability.py` — migration,
+  privacy, idempotence, conflicts, processing rows, regeneration isolation, and
+  validation
+- `README.md`, `AGENTS.md`, `status.md` — exact notebook and privacy semantics
+
+## Verification and rollback
+
+Use an isolated real-data copy to prove a Unicode/Markdown note is identical in
+EN and RU, rapid typing survives an in-flight save, Command-S works, clearing is
+durable, a stale second window cannot overwrite, processing-to-done promotion
+preserves the draft, regeneration/translation do not touch it, and both summary
+and full shared payloads omit it. Browser-test desktop/mobile, reload/deep-link,
+navigation with a pending save, failure/conflict recovery, owner exports, and
+all existing Summary/Transcript/Ask/audio flows.
+
+Production rollout is additive and starts with all six notebooks empty at
+revision zero. Before migration, back up SQLite and record canonical hashes;
+after deployment, use only invalid or stale no-op probes, confirm the existing
+Full link still contains no owner-notes key, verify all prior hashes and share
+tokens are unchanged, then check queues, service journal, served asset hashes,
+and SQLite integrity. Rollback ignores the three columns; no recording,
+transcript, generated note, action, speaker label, or share state is rewritten.

@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     artifacts_revision INTEGER NOT NULL DEFAULT 0,
     notes_revision INTEGER NOT NULL DEFAULT 0,
     notes_edited_at TEXT,
+    owner_notes_md TEXT,
+    owner_notes_revision INTEGER NOT NULL DEFAULT 0,
+    owner_notes_edited_at TEXT,
     speaker_me_label TEXT,
     speaker_them_label TEXT,
     speakers_revision INTEGER NOT NULL DEFAULT 0,
@@ -128,6 +131,9 @@ def init() -> None:
             "ALTER TABLE artifacts_lang ADD COLUMN notes_edited_at TEXT",
             "ALTER TABLE sessions ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE artifacts_lang ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN owner_notes_md TEXT",
+            "ALTER TABLE sessions ADD COLUMN owner_notes_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN owner_notes_edited_at TEXT",
             "ALTER TABLE sessions ADD COLUMN speaker_me_label TEXT",
             "ALTER TABLE sessions ADD COLUMN speaker_them_label TEXT",
             "ALTER TABLE sessions ADD COLUMN speakers_revision INTEGER NOT NULL DEFAULT 0",
@@ -322,6 +328,33 @@ def save_speaker_labels(conn, session_id: str, me: str | None,
     return cur.rowcount > 0
 
 
+def save_owner_notes(conn, session_id: str, markdown: str | None,
+                     expected_revision: int) -> str:
+    """Atomically save the private notebook without last-write-wins behavior.
+
+    Returns ``saved``, ``noop``, ``stale``, or ``missing``. An identical write
+    is deliberately a no-op so autosave retries cannot manufacture revisions.
+    """
+    cur = conn.execute(
+        """UPDATE sessions SET owner_notes_md=?,
+           owner_notes_revision=owner_notes_revision+1,
+           owner_notes_edited_at=CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END
+           WHERE id=? AND owner_notes_revision=?
+             AND NOT (owner_notes_md IS ?)""",
+        (markdown, markdown, session_id, expected_revision, markdown))
+    if cur.rowcount:
+        return "saved"
+    row = conn.execute(
+        """SELECT owner_notes_md,owner_notes_revision FROM sessions
+           WHERE id=?""", (session_id,)).fetchone()
+    if not row:
+        return "missing"
+    if (row["owner_notes_revision"] == expected_revision
+            and row["owner_notes_md"] == markdown):
+        return "noop"
+    return "stale"
+
+
 def stored_speaker_label(value) -> str | None:
     """Return a safe display/context label from SQLite, or the role fallback.
 
@@ -338,12 +371,21 @@ def stored_speaker_label(value) -> str | None:
     return label
 
 
-def session_row_to_dict(row) -> dict:
+def session_row_to_dict(row, include_owner_notes: bool = True) -> dict:
     d = dict(row)
     for k in ("outline_json", "keywords_json", "tags_json"):
         d[k.replace("_json", "")] = json.loads(d.pop(k) or "[]")
     d["summary"] = json.loads(d.pop("summary_json", None) or "{}")
     d["notes_edited"] = bool(d.pop("notes_edited_at", None))
+    owner_notes = d.pop("owner_notes_md", None)
+    owner_notes_revision = d.pop("owner_notes_revision", 0)
+    owner_notes_edited_at = d.pop("owner_notes_edited_at", None)
+    if include_owner_notes:
+        d["owner_notes"] = {
+            "markdown": owner_notes or "",
+            "revision": owner_notes_revision,
+            "edited": bool(owner_notes_edited_at and owner_notes),
+        }
     d["speaker_labels"] = {
         "me": stored_speaker_label(d.pop("speaker_me_label", None)),
         "them": stored_speaker_label(d.pop("speaker_them_label", None)),

@@ -202,7 +202,9 @@ def list_sessions(q: str = "", tag: str = ""):
             """SELECT s.*, (SELECT count(*) FROM actions a
                             WHERE a.session_id = s.id AND a.done = 0) AS open_actions
                FROM sessions s ORDER BY started_at DESC""").fetchall()
-    sessions = [db.session_row_to_dict(r) for r in rows]
+    # The library does not need to transfer up to 100 KiB of private notebook
+    # text per card. The individual authenticated session endpoint includes it.
+    sessions = [db.session_row_to_dict(r, include_owner_notes=False) for r in rows]
     if tag:
         sessions = [s for s in sessions if tag in (s.get("tags") or [])]
     if q:
@@ -283,6 +285,11 @@ class NotesEdit(BaseModel):
     summary: SummaryEdit
 
 
+class OwnerNotesEdit(BaseModel):
+    expected_revision: int
+    markdown: str
+
+
 def _clean_note_edit(body: NotesEdit, duration_s: float) -> tuple[str, str, dict]:
     title = body.title.strip()
     overview = body.overview_md.strip()
@@ -355,6 +362,59 @@ def edit_notes(session_id: str, body: NotesEdit, lang: str = "en"):
                 body.expected_revision):
             raise HTTPException(409, "notes changed while saving — reload and try again")
     return get_session(session_id, lang=lang)
+
+
+def _clean_owner_notes(value: str) -> str:
+    markdown = value.replace("\r\n", "\n").replace("\r", "\n")
+    if not markdown.strip():
+        return ""
+    if len(markdown.encode("utf-8")) > 100 * 1024:
+        raise HTTPException(422, "private notes are limited to 100 KiB")
+    if any(((ord(char) < 32 and char not in "\n\t")
+            or 127 <= ord(char) <= 159) for char in markdown):
+        raise HTTPException(422, "private notes cannot contain control characters")
+    return markdown
+
+
+@app.patch("/api/sessions/{session_id}/owner-notes")
+def edit_owner_notes(session_id: str, body: OwnerNotesEdit, lang: str = "en"):
+    if lang not in ("en", "ru"):
+        raise HTTPException(400, "only en and ru are supported")
+    if type(body.expected_revision) is not int or body.expected_revision < 0:
+        raise HTTPException(422, "invalid private notes revision")
+    markdown = _clean_owner_notes(body.markdown)
+    stored = markdown or None
+    with db.closing_conn() as conn:
+        row = conn.execute(
+            "SELECT owner_notes_revision FROM sessions WHERE id=?",
+            (session_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown session")
+        if row["owner_notes_revision"] != body.expected_revision:
+            raise HTTPException(
+                409, "private notes changed in another window — choose which copy to keep")
+        result = db.save_owner_notes(
+            conn, session_id, stored, body.expected_revision)
+        if result == "missing":
+            raise HTTPException(404, "unknown session")
+        if result == "stale":
+            raise HTTPException(
+                409, "private notes changed while saving — choose which copy to keep")
+        current = conn.execute(
+            """SELECT owner_notes_md,owner_notes_revision,owner_notes_edited_at
+               FROM sessions WHERE id=?""", (session_id,)).fetchone()
+        payload = {
+            "id": session_id,
+            "owner_notes": {
+                "markdown": current["owner_notes_md"] or "",
+                "revision": current["owner_notes_revision"],
+                "edited": bool(current["owner_notes_edited_at"]
+                               and current["owner_notes_md"]),
+            },
+        }
+    # Autosave must not echo thousands of transcript segments back to the
+    # browser after every edit; this is the complete private notebook DTO.
+    return payload
 
 
 class SpeakerLabelsEdit(BaseModel):

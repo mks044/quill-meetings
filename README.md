@@ -30,7 +30,10 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
 
 - **Summary first** — every meeting opens on a concise outcome, explicit
   decisions, topic-organized notes, open questions, and source-linked actions.
-- **Your notes stay yours** — correct the title or structured EN/RU summary in
+- **Private meeting notebook** — **My notes** is a language-neutral Markdown
+  page that autosaves independently from AI regeneration and never appears in
+  an anonymous share link, including a Full meeting link.
+- **Own the AI output** — correct the title or structured EN/RU summary in
   place, copy the useful summary alone, or copy the full meeting as Markdown.
 - **Transcript on demand** — a secondary tab with speaker-separated turns;
   click a line to hear that moment, follow the audio, or search every word.
@@ -46,7 +49,8 @@ bash install/link.sh user@your-server    # on the Mac  — connect them
   notes generate in your working language with an on-demand translation toggle.
 - **Share links** — read-only and revocable, with **Summary only** as the safe
   default. The owner must explicitly choose **Full meeting** before an anonymous
-  link can expose the transcript or audio; recipients can never edit the note.
+  link can expose the transcript or audio; recipients can never edit the note,
+  and the private **My notes** page is excluded from both scopes.
 
 Quill separates two audio **sources**, not arbitrary people: `me` is the Mac
 microphone and `them` is the call's system audio. On a group call, the other

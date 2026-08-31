@@ -143,10 +143,13 @@ Tell the operator, in their words:
   ends the recording cleanly — it transcribes and uploads on wake.
 - **Notes** appear automatically. Meetings open on **Summary** (outcome,
   decisions, topic notes, open questions, and actions); the verbatim record is
-  under **Transcript**. `••• → Edit notes` corrects the current EN/RU note;
+  under **Transcript**. **My notes** is the owner's separate language-neutral
+  Markdown notebook; it autosaves even while local transcription is still in
+  progress, survives AI regeneration/translation, and is never included in a
+  share link. `••• → Edit notes` corrects the current EN/RU AI note;
   **Copy summary** excludes the transcript, while **Copy full meeting** exports
-  everything as Markdown. `••• → Regenerate summary` re-runs the AI and warns
-  before replacing owner edits.
+  the private notebook, summary, and transcript as Markdown. `••• → Regenerate
+  summary` re-runs the AI and warns before replacing owner edits.
 - **Voices**: in **Transcript**, **Name voices** optionally labels the two
   recorder sources everywhere (transcript, player, search, Ask, export, and
   shares). `Your microphone` is one source; `Other side / system audio` may be
@@ -171,6 +174,10 @@ Tell the operator, in their words:
   microphone audio and `them` is all system audio. Owner-assigned names are
   revisioned session metadata; stale saves fail instead of overwriting a newer
   name, and AI results generated against an older name revision are discarded.
+- The private notebook is stored once per session, not once per language.
+  Autosave uses an optimistic revision: a stale browser gets 409 and must copy
+  its draft or deliberately reload. `owner_notes_md` is never projected into
+  either anonymous share DTO, including Full meeting links.
 - A provisional `meta.json` is written when capture starts and atomically
   finalized on stop. A hard power loss therefore remains discoverable by the
   next-launch recovery scan; CAF does not need a finalization pass. Dashboard
