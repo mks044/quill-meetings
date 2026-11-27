@@ -5,6 +5,7 @@ After=network-online.target
 [Service]
 WorkingDirectory=__DASH_DIR__
 Environment="PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-%h/.config/life-os-codex.env
 ExecStart=__DASH_DIR__/.venv/bin/uvicorn app.main:app --host __BIND__ --port __PORT__
 UMask=0077
 Restart=on-failure
